@@ -73,6 +73,11 @@ _infer_iot_raw() {
         return 0
     fi
 
+    if [[ -z "$cur" ]] && ((COMP_CWORD == 1)); then
+        COMPREPLY=($(compgen -W "$opts" -- "$cur"))
+        return 0
+    fi
+
     if ! _infer_iot_raw_has_interface_arg; then
         _infer_iot_raw_interfaces "$cur"
     fi
