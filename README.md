@@ -58,13 +58,13 @@ Show help:
 Run against an interface:
 
 ```bash
-sudo ./bin/infer_iot_raw enx000ec6bc22b0
+sudo ./bin/infer_iot_raw eth1
 ```
 
 Or with explicit options:
 
 ```bash
-sudo ./bin/infer_iot_raw -i enx000ec6bc22b0 -n 100 -t 15
+sudo ./bin/infer_iot_raw -i eth1 -n 100 -t 15
 ```
 
 Supported options:
