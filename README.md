@@ -104,7 +104,7 @@ The repository includes a Bash completion script at `completions/infer_iot_raw`.
 Load it in the current shell:
 
 ```bash
-source /opt/bg/device_discovery/completions/infer_iot_raw
+source device_discovery/completions/infer_iot_raw
 ```
 
 Or install it system-wide:
