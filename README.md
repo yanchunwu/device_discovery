@@ -1,17 +1,27 @@
-# device_discovery
+# IOT device discovery
 
-`device_discovery` is a small Linux command-line utility for observing raw Ethernet traffic on an interface and inferring likely IoT device network details from ARP and IPv4/UDP packets.
+`device_discovery` is a small Linux command-line utility focused on IOT device discovery. It listens to raw Ethernet traffic on a selected interface and infers likely device network details from ARP and IPv4/UDP packets.
 
-It is designed for cases where a device is easiest to identify during boot or first-link activity, such as after power-cycling an IoT device on an isolated network segment.
+It is intended for the common bring-up and reverse-engineering case where an IOT device is easiest to identify during boot, DHCP, ARP probing, or first-link activity. The typical workflow is to connect the device to an isolated segment, start capture, and then power-cycle the device so its initial network behavior can be observed and narrowed to a likely MAC, IP, and gateway.
+
+## IOT Discovery Use Case
+
+This tool is most useful when you need to answer questions like:
+
+- What MAC address does this IOT device use when it first comes online?
+- Does it request or probe for a specific IP address?
+- Is it using link-local addressing before it gets configured?
+- Does it advertise itself with SSDP or other early network traffic?
+- What gateway or network range does it appear to expect?
 
 ## Features
 
 - Captures raw Ethernet frames on a selected interface
-- Infers a likely device MAC address
-- Infers a likely device IP address
+- Infers a likely IOT device MAC address
+- Infers a likely IOT device IP address
 - Infers a likely gateway IP address from ARP traffic
-- Detects link-local probing activity
-- Detects SSDP traffic to `239.255.255.250:1900`
+- Detects link-local probing activity during device discovery
+- Detects SSDP traffic to `239.255.255.250:1900` during early device startup
 - Supports Bash autocompletion for flags and interface names
 
 ## Requirements
