@@ -74,6 +74,29 @@ Supported options:
 - `-t`, `--timeout <sec>`: stop after the given timeout
 - `-h`, `--help`: show help output
 
+Example output:
+
+```text
+./infer_iot_raw --interface eth1
+Listening on eth1 for up to 200 packets or 30 seconds...
+
+Inference result
+================
+Captured packets: 200
+Likely device MAC: b8:a4:4f:xx:xx:xx
+Likely device IP: 0.0.0.0
+Likely gateway IP: 172.19.0.1
+Link-local probe(s):
+  - 169.254.38.22
+SSDP observed: yes
+
+Suggested next test:
+  sudo ip addr flush dev eth1
+  sudo ip addr add 172.19.0.10/16 dev eth1
+  sudo ip link set eth1 up
+  ping -I eth1 0.0.0.0
+```
+
 ## Bash Autocompletion
 
 The repository includes a Bash completion script at `completions/infer_iot_raw`.
@@ -109,6 +132,6 @@ If an IP address is inferred, the tool prints a suggested next-step network test
 ## Repository Layout
 
 - `infer_iot_raw.cpp`: program source
-- `Makefile`: build, capability, and Bash completion install targets
+- `Makefile`: build, install, capability, and Bash completion install targets
 - `completions/infer_iot_raw`: Bash completion script
 - `bin/`: build output directory
