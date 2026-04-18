@@ -102,9 +102,8 @@ SSDP observed: yes
 
 Suggested next test:
   sudo ip addr flush dev eth1
-  sudo ip addr add 172.19.0.10/16 dev eth1
+  sudo ip addr add 172.19.0.10/24 dev eth1
   sudo ip link set eth1 up
-  ping -I eth1 0.0.0.0
 ```
 
 ## Bash Autocompletion

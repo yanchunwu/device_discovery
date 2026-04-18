@@ -6,11 +6,13 @@
 #include <netinet/if_ether.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
+#include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <cstring>
+#include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -141,6 +143,21 @@ static std::string macToString(const uint8_t* mac) {
     return oss.str();
 }
 
+static std::optional<std::string> getInterfaceMac(int fd, const std::string& ifname) {
+    if (ifname.size() >= IFNAMSIZ) {
+        return std::nullopt;
+    }
+
+    struct ifreq ifr {};
+    std::strncpy(ifr.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+
+    if (ioctl(fd, SIOCGIFHWADDR, &ifr) < 0) {
+        return std::nullopt;
+    }
+
+    return macToString(reinterpret_cast<const uint8_t*>(ifr.ifr_hwaddr.sa_data));
+}
+
 static std::string ipToString(uint32_t ip_be) {
     char buf[INET_ADDRSTRLEN] = {0};
     struct in_addr addr{};
@@ -149,6 +166,53 @@ static std::string ipToString(uint32_t ip_be) {
         return "unknown";
     }
     return std::string(buf);
+}
+
+static std::optional<uint32_t> parseIpv4String(const std::string& ip) {
+    struct in_addr addr {};
+    if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) {
+        return std::nullopt;
+    }
+    return ntohl(addr.s_addr);
+}
+
+static bool isUsableIpv4(const std::optional<std::string>& ip) {
+    if (!ip || *ip == "unknown") {
+        return false;
+    }
+
+    const auto parsed = parseIpv4String(*ip);
+    return parsed && *parsed != 0;
+}
+
+static std::optional<std::string> suggestLocalTestAddress(
+    const std::optional<std::string>& deviceIp,
+    const std::optional<std::string>& gatewayIp) {
+    const auto sourceIp = isUsableIpv4(deviceIp) ? deviceIp : gatewayIp;
+    if (!sourceIp) {
+        return std::nullopt;
+    }
+
+    const auto parsed = parseIpv4String(*sourceIp);
+    if (!parsed) {
+        return std::nullopt;
+    }
+
+    const uint32_t network = *parsed & 0xFFFFFF00u;
+    uint32_t host = 10;
+    if ((*parsed & 0xFFu) == host) {
+        host = 11;
+    }
+
+    struct in_addr addr {};
+    addr.s_addr = htonl(network | host);
+
+    char buf[INET_ADDRSTRLEN] = {0};
+    if (!inet_ntop(AF_INET, &addr, buf, sizeof(buf))) {
+        return std::nullopt;
+    }
+
+    return std::string(buf) + "/24";
 }
 
 static bool isLinkLocal(const std::string& ip) {
@@ -262,6 +326,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    const auto ownMac = getInterfaceMac(fd, cfg.ifname);
+    if (!ownMac) {
+        std::cerr << "Failed to read MAC address for interface: " << cfg.ifname << "\n";
+        close(fd);
+        return 1;
+    }
+
     struct sockaddr_ll sll{};
     sll.sll_family = AF_PACKET;
     sll.sll_protocol = htons(ETH_P_ALL);
@@ -279,16 +350,24 @@ int main(int argc, char* argv[]) {
 
     Observation obs;
     std::vector<uint8_t> buf(65536);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(cfg.timeoutSec);
 
     int captured = 0;
     while (captured < cfg.maxPackets) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            std::cout << "Timeout reached.\n";
+            break;
+        }
+
+        const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(fd, &rfds);
 
         struct timeval tv{};
-        tv.tv_sec = cfg.timeoutSec;
-        tv.tv_usec = 0;
+        tv.tv_sec = remaining.count() / 1000000;
+        tv.tv_usec = remaining.count() % 1000000;
 
         int rc = select(fd + 1, &rfds, nullptr, nullptr, &tv);
         if (rc < 0) {
@@ -318,9 +397,13 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        const auto* eth = reinterpret_cast<const struct ether_header*>(buf.data());
+        if (macToString(eth->ether_shost) == *ownMac) {
+            continue;
+        }
+
         ++captured;
 
-        const auto* eth = reinterpret_cast<const struct ether_header*>(buf.data());
         const uint16_t etherType = ntohs(eth->ether_type);
 
         if (etherType == ETHERTYPE_ARP) {
@@ -354,12 +437,15 @@ int main(int argc, char* argv[]) {
 
     std::cout << "SSDP observed: " << (obs.sawSSDP ? "yes" : "no") << "\n";
 
-    if (deviceIp) {
+    const auto suggestedLocalIp = suggestLocalTestAddress(deviceIp, gatewayIp);
+    if (suggestedLocalIp) {
         std::cout << "\nSuggested next test:\n";
         std::cout << "  sudo ip addr flush dev " << cfg.ifname << "\n";
-        std::cout << "  sudo ip addr add 172.19.0.10/16 dev " << cfg.ifname << "\n";
+        std::cout << "  sudo ip addr add " << *suggestedLocalIp << " dev " << cfg.ifname << "\n";
         std::cout << "  sudo ip link set " << cfg.ifname << " up\n";
-        std::cout << "  ping -I " << cfg.ifname << " " << *deviceIp << "\n";
+        if (isUsableIpv4(deviceIp)) {
+            std::cout << "  ping -I " << cfg.ifname << " " << *deviceIp << "\n";
+        }
     }
 
     return 0;
