@@ -307,6 +307,7 @@ static void handleIpv4(const uint8_t* frame, ssize_t len, Observation& obs) {
     }
 }
 
+#ifndef INFER_IOT_RAW_TEST
 int main(int argc, char* argv[]) {
     Config cfg;
     if (!parseArgs(argc, argv, cfg)) {
@@ -450,3 +451,4 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
+#endif

@@ -51,6 +51,12 @@ To remove the built binary:
 make clean
 ```
 
+Run the unit tests:
+
+```bash
+make test
+```
+
 To grant the binary raw-socket capability without running as root:
 
 ```bash
