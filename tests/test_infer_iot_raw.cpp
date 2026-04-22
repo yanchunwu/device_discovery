@@ -10,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../infer_iot_raw.cpp"
@@ -128,6 +129,54 @@ void testSuggestLocalTestAddressUsesDeviceOrGatewaySubnet() {
     expect(fromGateway && *fromGateway == "172.16.1.11/24", "expected host fallback to avoid .10 collision");
 }
 
+void testInterfacePollAttemptsCoversTimeoutWindow() {
+    expect(interfacePollAttempts(1) == 5, "1 second timeout should result in five polls at 250ms intervals");
+    expect(interfacePollAttempts(3) == 13, "3 second timeout should result in thirteen polls including the initial check");
+}
+
+void testWaitForInterfaceReturnsWhenInterfaceAppears() {
+    std::vector<unsigned int> responses = {0, 0, 17};
+    size_t resolverCallCount = 0;
+    int sleepCallCount = 0;
+    std::ostringstream status;
+
+    const auto ifindex = waitForInterface(
+        "enxdeadbeef",
+        5,
+        [&](const char*) {
+            return responses.at(resolverCallCount++);
+        },
+        [&]() {
+            ++sleepCallCount;
+        },
+        &status);
+
+    expect(ifindex && *ifindex == 17, "expected interface wait to return the discovered index");
+    expect(resolverCallCount == 3, "expected polling to stop once the interface appears");
+    expect(sleepCallCount == 2, "expected sleeps only between failed polls");
+    expect(status.str() == "Waiting for interface enxdeadbeef to appear...\n", "expected one wait status message");
+}
+
+void testWaitForInterfaceTimesOutCleanly() {
+    int resolverCallCount = 0;
+    int sleepCallCount = 0;
+
+    const auto ifindex = waitForInterface(
+        "missing0",
+        4,
+        [&](const char*) {
+            ++resolverCallCount;
+            return 0u;
+        },
+        [&]() {
+            ++sleepCallCount;
+        });
+
+    expect(!ifindex, "expected missing interface to time out without crashing");
+    expect(resolverCallCount == 4, "expected resolver to be called for every poll attempt");
+    expect(sleepCallCount == 3, "expected no sleep after the final failed poll");
+}
+
 void testHandleArpTracksGatewayAndLinkLocalProbe() {
     const uint8_t srcMac[6] = {0xb8, 0xa4, 0x4f, 0x01, 0x02, 0x03};
     Observation obs;
@@ -168,6 +217,9 @@ int main() {
         {"parseArgs accepts flags and positional interface", testParseArgsAcceptsFlagsAndPositionalInterface},
         {"parseArgs rejects invalid packet count", testParseArgsRejectsInvalidPacketCount},
         {"suggestLocalTestAddress uses device or gateway subnet", testSuggestLocalTestAddressUsesDeviceOrGatewaySubnet},
+        {"interfacePollAttempts covers timeout window", testInterfacePollAttemptsCoversTimeoutWindow},
+        {"waitForInterface returns when interface appears", testWaitForInterfaceReturnsWhenInterfaceAppears},
+        {"waitForInterface times out cleanly", testWaitForInterfaceTimesOutCleanly},
         {"handleArp tracks gateway and link-local probe", testHandleArpTracksGatewayAndLinkLocalProbe},
         {"handleIpv4 tracks source and detects SSDP", testHandleIpv4TracksSourceAndDetectsSsdp},
     };

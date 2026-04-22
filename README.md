@@ -83,6 +83,8 @@ Or with explicit options:
 sudo ./bin/infer_iot_raw -i eth1 -n 100 -t 15
 ```
 
+If the named interface is not present yet, the program waits for it to appear for up to the configured timeout, then starts capture once the interface exists.
+
 Supported options:
 
 - `-i`, `--interface <name>`: network interface to listen on
@@ -119,7 +121,19 @@ The repository includes a Bash completion script at `completions/infer_iot_raw`.
 Load it in the current shell:
 
 ```bash
-source device_discovery/completions/infer_iot_raw
+source /opt/bg/device_discovery/completions/infer_iot_raw
+```
+
+If you are already in the repository root, this also works:
+
+```bash
+source completions/infer_iot_raw
+```
+
+To load it automatically in future Bash sessions, add this line to your `~/.bashrc`:
+
+```bash
+[ -f /opt/bg/device_discovery/completions/infer_iot_raw ] && source /opt/bg/device_discovery/completions/infer_iot_raw
 ```
 
 Or install it system-wide:

@@ -15,6 +15,7 @@
 #include <chrono>
 #include <iomanip>
 #include <iostream>
+#include <thread>
 #include <map>
 #include <optional>
 #include <set>
@@ -231,6 +232,44 @@ static std::optional<std::string> mostFrequent(const std::map<std::string, int>&
     return value;
 }
 
+static constexpr auto kInterfacePollInterval = std::chrono::milliseconds(250);
+
+static int interfacePollAttempts(int timeoutSec) {
+    const auto timeoutMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::seconds(timeoutSec));
+    return static_cast<int>(timeoutMs / kInterfacePollInterval) + 1;
+}
+
+template <typename Resolver, typename Sleeper>
+static std::optional<int> waitForInterface(
+    const std::string& ifname,
+    int attempts,
+    Resolver&& resolver,
+    Sleeper&& sleeper,
+    std::ostream* statusStream = nullptr) {
+    bool announcedWait = false;
+
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        const unsigned int ifindex = resolver(ifname.c_str());
+        if (ifindex != 0) {
+            return static_cast<int>(ifindex);
+        }
+
+        if (attempt + 1 >= attempts) {
+            break;
+        }
+
+        if (statusStream && !announcedWait) {
+            *statusStream << "Waiting for interface " << ifname << " to appear...\n";
+            announcedWait = true;
+        }
+
+        sleeper();
+    }
+
+    return std::nullopt;
+}
+
 static void handleArp(const uint8_t* frame, ssize_t len, Observation& obs) {
     if (len < static_cast<ssize_t>(sizeof(struct ether_header) + sizeof(struct ether_arp))) {
         return;
@@ -320,9 +359,14 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    int ifindex = if_nametoindex(cfg.ifname.c_str());
-    if (ifindex == 0) {
-        std::cerr << "Unknown interface: " << cfg.ifname << "\n";
+    const auto ifindex = waitForInterface(
+        cfg.ifname,
+        interfacePollAttempts(cfg.timeoutSec),
+        [](const char* ifname) { return if_nametoindex(ifname); },
+        []() { std::this_thread::sleep_for(kInterfacePollInterval); },
+        &std::cout);
+    if (!ifindex) {
+        std::cerr << "Interface did not appear within timeout: " << cfg.ifname << "\n";
         close(fd);
         return 1;
     }
@@ -337,7 +381,7 @@ int main(int argc, char* argv[]) {
     struct sockaddr_ll sll{};
     sll.sll_family = AF_PACKET;
     sll.sll_protocol = htons(ETH_P_ALL);
-    sll.sll_ifindex = ifindex;
+    sll.sll_ifindex = *ifindex;
 
     if (bind(fd, reinterpret_cast<struct sockaddr*>(&sll), sizeof(sll)) < 0) {
         std::cerr << "bind() failed: " << std::strerror(errno) << "\n";
