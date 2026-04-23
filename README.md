@@ -163,6 +163,36 @@ The completion script supports:
 - interface-name completion from `/sys/class/net`
 - command completion for `infer_iot_raw`, `./infer_iot_raw`, `bin/infer_iot_raw`, and `./bin/infer_iot_raw`
 
+## Systemd Service
+
+The repository includes a helper script at `scripts/setup-systemd-service.sh` that installs the recommended hardened template unit using a dedicated `inferiot` service account.
+
+Build the binary first:
+
+```bash
+make
+```
+
+Then run the setup script. Pass the interface name as the first argument if you do not want the default `enx000ec6bc22b0`:
+
+```bash
+chmod +x scripts/setup-systemd-service.sh
+./scripts/setup-systemd-service.sh
+./scripts/setup-systemd-service.sh enx000ec6bc22b0
+```
+
+The script writes:
+
+- `/etc/default/infer_iot_raw` with `PACKETS` and `TIMEOUT`
+- `/etc/systemd/system/infer_iot_raw@.service` as a template unit
+- `/var/lib/infer_iot_raw/infer_iot_raw-<interface>.log` as the runtime log path
+
+You can override the packet and timeout defaults when invoking the script:
+
+```bash
+PACKETS=500000 TIMEOUT=1800 ./scripts/setup-systemd-service.sh enx000ec6bc22b0
+```
+
 ## Typical Workflow
 
 1. Build the tool with `make`.
@@ -178,4 +208,5 @@ If an IP address is inferred, the tool prints a suggested next-step network test
 - `infer_iot_raw.cpp`: program source
 - `Makefile`: build, install, capability, and Bash completion install targets
 - `completions/infer_iot_raw.bash`: Bash completion script
+- `scripts/setup-systemd-service.sh`: helper for installing the hardened systemd template unit
 - `bin/`: build output directory
