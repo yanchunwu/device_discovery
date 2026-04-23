@@ -10,7 +10,7 @@ TEST_TARGET := $(BIN_DIR)/test_infer_iot_raw
 INSTALL_DIR ?= /usr/local/bin
 INSTALL_DEST := $(INSTALL_DIR)/infer_iot_raw
 COMPLETION_DIR ?= /usr/share/bash-completion/completions
-COMPLETION_SRC := completions/infer_iot_raw
+COMPLETION_SRC := completions/infer_iot_raw.bash
 COMPLETION_DEST := $(COMPLETION_DIR)/infer_iot_raw
 
 .PHONY: all clean test install install-cap install-bash-completion

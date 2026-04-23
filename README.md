@@ -130,24 +130,24 @@ Suggested next test:
 
 ## Bash Autocompletion
 
-The repository includes a Bash completion script at `completions/infer_iot_raw`.
+The repository includes a Bash completion script at `completions/infer_iot_raw.bash`.
 
 Load it in the current shell:
 
 ```bash
-source /opt/bg/device_discovery/completions/infer_iot_raw
+source /opt/bg/device_discovery/completions/infer_iot_raw.bash
 ```
 
 If you are already in the repository root, this also works:
 
 ```bash
-source completions/infer_iot_raw
+source completions/infer_iot_raw.bash
 ```
 
 To load it automatically in future Bash sessions, add this line to your `~/.bashrc`:
 
 ```bash
-[ -f /opt/bg/device_discovery/completions/infer_iot_raw ] && source /opt/bg/device_discovery/completions/infer_iot_raw
+[ -f /opt/bg/device_discovery/completions/infer_iot_raw.bash ] && source /opt/bg/device_discovery/completions/infer_iot_raw.bash
 ```
 
 Or install it system-wide:
@@ -176,5 +176,5 @@ If an IP address is inferred, the tool prints a suggested next-step network test
 
 - `infer_iot_raw.cpp`: program source
 - `Makefile`: build, install, capability, and Bash completion install targets
-- `completions/infer_iot_raw`: Bash completion script
+- `completions/infer_iot_raw.bash`: Bash completion script
 - `bin/`: build output directory
