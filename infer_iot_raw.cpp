@@ -12,7 +12,9 @@
 #include <unistd.h>
 
 #include <cstring>
+#include <cctype>
 #include <chrono>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <thread>
@@ -21,6 +23,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 struct Observation {
@@ -230,6 +233,89 @@ static std::optional<std::string> mostFrequent(const std::map<std::string, int>&
         }
     }
     return value;
+}
+
+static std::string trim(const std::string& s) {
+    size_t start = 0;
+    while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) {
+        ++start;
+    }
+
+    size_t end = s.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) {
+        --end;
+    }
+
+    return s.substr(start, end - start);
+}
+
+static std::string normalizeOuiPrefix(const std::string& value) {
+    std::string normalized;
+    normalized.reserve(6);
+
+    for (const unsigned char ch : value) {
+        if (std::isxdigit(ch)) {
+            normalized.push_back(static_cast<char>(std::toupper(ch)));
+            if (normalized.size() == 6) {
+                break;
+            }
+        }
+    }
+
+    if (normalized.size() != 6) {
+        return "";
+    }
+
+    return normalized;
+}
+
+static std::optional<std::pair<std::string, std::string>> parseOuiLine(const std::string& line) {
+    const auto marker = line.find("(base 16)");
+    if (marker == std::string::npos) {
+        return std::nullopt;
+    }
+
+    const std::string prefix = normalizeOuiPrefix(line.substr(0, marker));
+    if (prefix.empty()) {
+        return std::nullopt;
+    }
+
+    const std::string vendor = trim(line.substr(marker + std::strlen("(base 16)")));
+    if (vendor.empty()) {
+        return std::nullopt;
+    }
+
+    return std::make_pair(prefix, vendor);
+}
+
+static std::optional<std::string> lookupMacVendor(
+    const std::string& mac,
+    const std::vector<std::string>& ouiPaths = {
+        "/usr/share/ieee-data/oui.txt",
+        "/var/lib/ieee-data/oui.txt",
+        "/usr/share/misc/oui.txt",
+    }) {
+    const std::string prefix = normalizeOuiPrefix(mac);
+    if (prefix.empty()) {
+        return std::nullopt;
+    }
+
+    for (const auto& path : ouiPaths) {
+        std::ifstream input(path);
+        if (!input) {
+            continue;
+        }
+
+        std::string line;
+        while (std::getline(input, line)) {
+            const auto entry = parseOuiLine(line);
+            if (entry && entry->first == prefix) {
+                return entry->second;
+            }
+        }
+    }
+
+    return std::nullopt;
 }
 
 static constexpr auto kInterfacePollInterval = std::chrono::milliseconds(250);
@@ -463,11 +549,15 @@ int main(int argc, char* argv[]) {
     auto deviceMac = mostFrequent(obs.macCount);
     auto deviceIp = mostFrequent(obs.srcIpCount);
     auto gatewayIp = mostFrequent(obs.arpGatewayCount);
+    const auto deviceVendor = deviceMac ? lookupMacVendor(*deviceMac) : std::nullopt;
 
     std::cout << "\nInference result\n";
     std::cout << "================\n";
     std::cout << "Captured packets: " << captured << "\n";
     std::cout << "Likely device MAC: " << (deviceMac ? *deviceMac : "unknown") << "\n";
+    if (deviceVendor) {
+        std::cout << "Likely device vendor: " << *deviceVendor << "\n";
+    }
     std::cout << "Likely device IP: " << (deviceIp ? *deviceIp : "unknown") << "\n";
     std::cout << "Likely gateway IP: " << (gatewayIp ? *gatewayIp : "unknown") << "\n";
 

@@ -5,6 +5,8 @@
 #include <netinet/udp.h>
 
 #include <cstring>
+#include <cstdio>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -129,6 +131,38 @@ void testSuggestLocalTestAddressUsesDeviceOrGatewaySubnet() {
     expect(fromGateway && *fromGateway == "172.16.1.11/24", "expected host fallback to avoid .10 collision");
 }
 
+void testNormalizeOuiPrefixAcceptsMacFormats() {
+    expect(normalizeOuiPrefix("b8:a4:4f:01:02:03") == "B8A44F", "expected colon-delimited MAC to normalize");
+    expect(normalizeOuiPrefix("B8-A4-4F") == "B8A44F", "expected hyphenated OUI to normalize");
+    expect(normalizeOuiPrefix("invalid") == "", "expected invalid OUI input to be rejected");
+}
+
+void testParseOuiLineExtractsVendorEntry() {
+    const auto entry = parseOuiLine("B8A44F     (base 16)\t\tShenzhen Example Devices");
+    expect(entry.has_value(), "expected IEEE base-16 line to parse");
+    expect(entry->first == "B8A44F", "expected parsed OUI prefix");
+    expect(entry->second == "Shenzhen Example Devices", "expected parsed vendor name");
+
+    expect(!parseOuiLine("B8-A4-4F   (hex)\t\tIgnored").has_value(), "expected non-base-16 line to be ignored");
+}
+
+void testLookupMacVendorUsesLocalOuiFile() {
+    const char* path = "/tmp/device_discovery_test_oui.txt";
+    {
+        std::ofstream output(path);
+        output << "B8A44F     (base 16)\t\tShenzhen Example Devices\n";
+        output << "00163E     (base 16)\t\tExample Hypervisor Vendor\n";
+    }
+
+    const auto vendor = lookupMacVendor("b8:a4:4f:01:02:03", {path});
+    expect(vendor && *vendor == "Shenzhen Example Devices", "expected vendor lookup to match normalized OUI");
+
+    const auto unknownVendor = lookupMacVendor("aa:bb:cc:01:02:03", {path});
+    expect(!unknownVendor.has_value(), "expected unknown OUI to return no vendor");
+
+    std::remove(path);
+}
+
 void testInterfacePollAttemptsCoversTimeoutWindow() {
     expect(interfacePollAttempts(1) == 5, "1 second timeout should result in five polls at 250ms intervals");
     expect(interfacePollAttempts(3) == 13, "3 second timeout should result in thirteen polls including the initial check");
@@ -217,6 +251,9 @@ int main() {
         {"parseArgs accepts flags and positional interface", testParseArgsAcceptsFlagsAndPositionalInterface},
         {"parseArgs rejects invalid packet count", testParseArgsRejectsInvalidPacketCount},
         {"suggestLocalTestAddress uses device or gateway subnet", testSuggestLocalTestAddressUsesDeviceOrGatewaySubnet},
+        {"normalizeOuiPrefix accepts MAC formats", testNormalizeOuiPrefixAcceptsMacFormats},
+        {"parseOuiLine extracts vendor entry", testParseOuiLineExtractsVendorEntry},
+        {"lookupMacVendor uses local OUI file", testLookupMacVendorUsesLocalOuiFile},
         {"interfacePollAttempts covers timeout window", testInterfacePollAttemptsCoversTimeoutWindow},
         {"waitForInterface returns when interface appears", testWaitForInterfaceReturnsWhenInterfaceAppears},
         {"waitForInterface times out cleanly", testWaitForInterfaceTimesOutCleanly},

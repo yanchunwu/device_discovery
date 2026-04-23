@@ -18,6 +18,7 @@ This tool is most useful when you need to answer questions like:
 
 - Captures raw Ethernet frames on a selected interface
 - Infers a likely IOT device MAC address
+- Looks up the likely device vendor from the MAC OUI when a local IEEE OUI database is available
 - Infers a likely IOT device IP address
 - Infers a likely gateway IP address from ARP traffic
 - Detects link-local probing activity during device discovery
@@ -85,6 +86,8 @@ sudo ./bin/infer_iot_raw -i eth1 -n 100 -t 15
 
 If the named interface is not present yet, the program waits for it to appear for up to the configured timeout, then starts capture once the interface exists.
 
+If the system has an IEEE OUI database installed, the output also includes a likely vendor name for the inferred device MAC.
+
 Supported options:
 
 - `-i`, `--interface <name>`: network interface to listen on
@@ -102,6 +105,7 @@ Inference result
 ================
 Captured packets: 200
 Likely device MAC: b8:a4:4f:xx:xx:xx
+Likely device vendor: Shenzhen Example Devices
 Likely device IP: 0.0.0.0
 Likely gateway IP: 172.19.0.1
 Link-local probe(s):
