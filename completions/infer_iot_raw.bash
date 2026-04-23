@@ -27,6 +27,8 @@ _infer_iot_raw_has_interface_arg() {
             -n|--packets|-t|--timeout|-o|--output)
                 ((++i))
                 ;;
+            -l|--loop)
+                ;;
             --)
                 ((++i))
                 break
@@ -49,7 +51,7 @@ _infer_iot_raw_has_interface_arg() {
 
 _infer_iot_raw() {
     local cur prev
-    local opts="-h --help -i --interface -n --packets -t --timeout -o --output"
+    local opts="-h --help -i --interface -n --packets -t --timeout -o --output -l --loop"
 
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
@@ -64,6 +66,9 @@ _infer_iot_raw() {
             return 0
             ;;
         -n|--packets|-t|--timeout|-o|--output)
+            return 0
+            ;;
+        -l|--loop)
             return 0
             ;;
     esac

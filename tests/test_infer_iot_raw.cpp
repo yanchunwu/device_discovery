@@ -112,6 +112,7 @@ void testParseArgsAcceptsFlagsAndPositionalInterface() {
     expect(cfg.maxPackets == 64, "expected packet count to be parsed");
     expect(cfg.timeoutSec == 9, "expected timeout to be parsed");
     expect(cfg.outputPath == "infer_iot_raw.log", "expected default output path to be set");
+    expect(!cfg.loopForever, "expected loop mode to be disabled by default");
 }
 
 void testParseArgsAcceptsCustomOutputPath() {
@@ -122,6 +123,16 @@ void testParseArgsAcceptsCustomOutputPath() {
     expect(parseArgs(static_cast<int>(argv.size()), argv.data(), cfg), "parseArgs should accept output path");
     expect(cfg.ifname == "eth0", "expected interface flag to be parsed");
     expect(cfg.outputPath == "capture.log", "expected custom output path to be parsed");
+}
+
+void testParseArgsAcceptsLoopFlag() {
+    Config cfg;
+    std::vector<std::string> args = {"infer_iot_raw", "-i", "eth0", "--loop"};
+    auto argv = makeArgv(args);
+
+    expect(parseArgs(static_cast<int>(argv.size()), argv.data(), cfg), "parseArgs should accept loop flag");
+    expect(cfg.ifname == "eth0", "expected interface flag to be parsed");
+    expect(cfg.loopForever, "expected loop mode to be enabled");
 }
 
 void testParseArgsRejectsInvalidPacketCount() {
@@ -188,6 +199,12 @@ void testFormatRunTimestampLineUsesExpectedPrefix() {
     expect(
         formatRunTimestampLine("2026-04-22 10:11:12") == "Timestamp: 2026-04-22 10:11:12\n",
         "expected startup timestamp line to use the documented format");
+}
+
+void testFormatLoopContinuationLineUsesExpectedText() {
+    expect(
+        formatLoopContinuationLine() == "Loop mode enabled: starting the next capture session.\n",
+        "expected loop continuation line to use the documented format");
 }
 
 void testFormatInferenceReportIncludesSummary() {
@@ -298,6 +315,7 @@ int main() {
     } tests[] = {
         {"parseArgs accepts flags and positional interface", testParseArgsAcceptsFlagsAndPositionalInterface},
         {"parseArgs accepts custom output path", testParseArgsAcceptsCustomOutputPath},
+        {"parseArgs accepts loop flag", testParseArgsAcceptsLoopFlag},
         {"parseArgs rejects invalid packet count", testParseArgsRejectsInvalidPacketCount},
         {"suggestLocalTestAddress uses device or gateway subnet", testSuggestLocalTestAddressUsesDeviceOrGatewaySubnet},
         {"normalizeOuiPrefix accepts MAC formats", testNormalizeOuiPrefixAcceptsMacFormats},
@@ -305,6 +323,7 @@ int main() {
         {"lookupMacVendor uses local OUI file", testLookupMacVendorUsesLocalOuiFile},
         {"writeToStreams mirrors message", testWriteToStreamsMirrorsMessage},
         {"formatRunTimestampLine uses expected prefix", testFormatRunTimestampLineUsesExpectedPrefix},
+        {"formatLoopContinuationLine uses expected text", testFormatLoopContinuationLineUsesExpectedText},
         {"formatInferenceReport includes summary", testFormatInferenceReportIncludesSummary},
         {"interfacePollAttempts covers timeout window", testInterfacePollAttemptsCoversTimeoutWindow},
         {"waitForInterface returns when interface appears", testWaitForInterfaceReturnsWhenInterfaceAppears},

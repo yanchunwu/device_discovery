@@ -24,6 +24,7 @@ This tool is most useful when you need to answer questions like:
 - Detects link-local probing activity during device discovery
 - Detects SSDP traffic to `239.255.255.250:1900` during early device startup
 - Appends normal run output to `infer_iot_raw.log` in the current directory by default
+- Can repeat capture sessions indefinitely with `--loop`
 - Supports Bash autocompletion for flags and interface names
 
 ## Requirements
@@ -91,11 +92,19 @@ Or choose a custom log filename:
 sudo ./bin/infer_iot_raw -i eth1 -o my-capture.log
 ```
 
+Or keep running capture sessions forever:
+
+```bash
+sudo ./bin/infer_iot_raw -i eth1 --loop
+```
+
 If the named interface is not present yet, the program waits for it to appear for up to the configured timeout, then starts capture once the interface exists.
 
 If the system has an IEEE OUI database installed, the output also includes a likely vendor name for the inferred device MAC.
 
 By default, normal run output is also appended to `./infer_iot_raw.log`. Use `-o` or `--output` to change the log filename or path.
+
+Use `-l` or `--loop` to restart capture automatically after each inference report instead of exiting.
 
 Supported options:
 
@@ -103,6 +112,7 @@ Supported options:
 - `-n`, `--packets <count>`: maximum packets to capture
 - `-t`, `--timeout <sec>`: stop after the given timeout
 - `-o`, `--output <path>`: log file path, default `infer_iot_raw.log`
+- `-l`, `--loop`: repeat capture sessions forever
 - `-h`, `--help`: show help output
 
 Example output:
@@ -127,6 +137,8 @@ Suggested next test:
   sudo ip addr flush dev eth1
   sudo ip addr add 172.19.0.10/24 dev eth1
   sudo ip link set eth1 up
+
+Loop mode enabled: starting the next capture session.
 ```
 
 ## Bash Autocompletion
@@ -159,7 +171,7 @@ make install-bash-completion
 
 The completion script supports:
 
-- option completion for `-h`, `--help`, `-i`, `--interface`, `-n`, `--packets`, `-t`, `--timeout`, `-o`, `--output`
+- option completion for `-h`, `--help`, `-i`, `--interface`, `-n`, `--packets`, `-t`, `--timeout`, `-o`, `--output`, `-l`, `--loop`
 - interface-name completion from `/sys/class/net`
 - command completion for `infer_iot_raw`, `./infer_iot_raw`, `bin/infer_iot_raw`, and `./bin/infer_iot_raw`
 

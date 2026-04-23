@@ -40,6 +40,7 @@ struct Config {
     int maxPackets = 200;
     int timeoutSec = 30;
     std::string outputPath = "infer_iot_raw.log";
+    bool loopForever = false;
 };
 
 static void printHelp(const char* prog) {
@@ -55,16 +56,19 @@ static void printHelp(const char* prog) {
         << "  -n, --packets <count>    Maximum number of packets to capture (default: 200)\n"
         << "  -t, --timeout <sec>      Stop after timeout in seconds (default: 30)\n"
         << "  -o, --output <path>      Log file path (default: infer_iot_raw.log)\n"
+        << "  -l, --loop               Repeat capture sessions forever\n"
         << "  -h, --help               Show this help message\n\n"
         << "Examples:\n"
         << "  sudo " << prog << " eth1\n"
         << "  sudo " << prog << " -i eth1 -n 100 -t 15\n"
-        << "  sudo " << prog << " -i eth1 -o capture.log\n\n"
+        << "  sudo " << prog << " -i eth1 -o capture.log\n"
+        << "  sudo " << prog << " -i eth1 --loop\n\n"
         << "Notes:\n"
         << "  - Requires Linux.\n"
         << "  - Requires root or CAP_NET_RAW.\n"
         << "  - Best results come from starting capture, then power-cycling the IoT device.\n"
-        << "  - Appends normal run output to the selected log file.\n";
+        << "  - Appends normal run output to the selected log file.\n"
+        << "  - Loop mode reruns capture sessions until interrupted.\n";
 }
 
 static bool parseInt(const std::string& s, int& value) {
@@ -129,6 +133,8 @@ static bool parseArgs(int argc, char* argv[], Config& cfg) {
                 printHelp(argv[0]);
                 return false;
             }
+        } else if (arg == "-l" || arg == "--loop") {
+            cfg.loopForever = true;
         } else if (!arg.empty() && arg[0] == '-') {
             std::cerr << "Unknown option: " << arg << "\n\n";
             printHelp(argv[0]);
@@ -363,6 +369,10 @@ static std::string formatRunTimestampLine(const std::string& timestamp) {
     return "Timestamp: " + timestamp + "\n";
 }
 
+static std::string formatLoopContinuationLine() {
+    return "Loop mode enabled: starting the next capture session.\n";
+}
+
 static std::string formatInferenceReport(const Config& cfg, int captured, const Observation& obs) {
     const auto deviceMac = mostFrequent(obs.macCount);
     const auto deviceIp = mostFrequent(obs.srcIpCount);
@@ -406,6 +416,7 @@ static std::string formatInferenceReport(const Config& cfg, int captured, const 
 }
 
 static constexpr auto kInterfacePollInterval = std::chrono::milliseconds(250);
+static constexpr auto kLoopRestartDelay = std::chrono::seconds(1);
 
 static int interfacePollAttempts(int timeoutSec) {
     const auto timeoutMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -520,28 +531,8 @@ static void handleIpv4(const uint8_t* frame, ssize_t len, Observation& obs) {
     }
 }
 
-#ifndef INFER_IOT_RAW_TEST
-int main(int argc, char* argv[]) {
-    Config cfg;
-    if (!parseArgs(argc, argv, cfg)) {
-        return (argc > 1 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help")) ? 0 : 1;
-    }
-
-    const std::string runTimestamp = currentLocalTimestamp();
-
-    errno = 0;
-    std::ofstream logFile(cfg.outputPath, std::ios::app);
-    std::ostream* logStream = nullptr;
-    if (!logFile) {
-        const int logOpenErrno = errno;
-        std::cerr << "Warning: failed to open log file '" << cfg.outputPath
-                  << "': " << std::strerror(logOpenErrno) << "\n";
-    } else {
-        logStream = &logFile;
-        *logStream << "=== infer_iot_raw run at " << currentLocalTimestamp() << " ===\n";
-    }
-
-    writeToStreams(formatRunTimestampLine(runTimestamp), &std::cout, logStream);
+static int runCaptureSession(const Config& cfg, std::ostream* logStream) {
+    writeToStreams(formatRunTimestampLine(currentLocalTimestamp()), &std::cout, logStream);
 
     int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (fd < 0) {
@@ -656,6 +647,46 @@ int main(int argc, char* argv[]) {
     close(fd);
 
     writeToStreams(formatInferenceReport(cfg, captured, obs), &std::cout, logStream);
+
+    return 0;
+}
+
+#ifndef INFER_IOT_RAW_TEST
+int main(int argc, char* argv[]) {
+    Config cfg;
+    if (!parseArgs(argc, argv, cfg)) {
+        return (argc > 1 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help")) ? 0 : 1;
+    }
+
+    errno = 0;
+    std::ofstream logFile(cfg.outputPath, std::ios::app);
+    std::ostream* logStream = nullptr;
+    if (!logFile) {
+        const int logOpenErrno = errno;
+        std::cerr << "Warning: failed to open log file '" << cfg.outputPath
+                  << "': " << std::strerror(logOpenErrno) << "\n";
+    } else {
+        logStream = &logFile;
+        *logStream << "=== infer_iot_raw run at " << currentLocalTimestamp() << " ===\n";
+    }
+
+    do {
+        if (runCaptureSession(cfg, logStream) != 0) {
+            return 1;
+        }
+
+        if (!cfg.loopForever) {
+            break;
+        }
+
+        writeToStreams(formatLoopContinuationLine(), &std::cout, logStream);
+        if (logStream) {
+            *logStream << "\n";
+            logFile.flush();
+        }
+        std::this_thread::sleep_for(kLoopRestartDelay);
+    } while (true);
+
     if (logStream) {
         *logStream << "\n";
         logFile.flush();
