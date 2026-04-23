@@ -111,6 +111,17 @@ void testParseArgsAcceptsFlagsAndPositionalInterface() {
     expect(cfg.ifname == "eth9", "expected positional interface to populate config");
     expect(cfg.maxPackets == 64, "expected packet count to be parsed");
     expect(cfg.timeoutSec == 9, "expected timeout to be parsed");
+    expect(cfg.outputPath == "infer_iot_raw.log", "expected default output path to be set");
+}
+
+void testParseArgsAcceptsCustomOutputPath() {
+    Config cfg;
+    std::vector<std::string> args = {"infer_iot_raw", "-i", "eth0", "-o", "capture.log"};
+    auto argv = makeArgv(args);
+
+    expect(parseArgs(static_cast<int>(argv.size()), argv.data(), cfg), "parseArgs should accept output path");
+    expect(cfg.ifname == "eth0", "expected interface flag to be parsed");
+    expect(cfg.outputPath == "capture.log", "expected custom output path to be parsed");
 }
 
 void testParseArgsRejectsInvalidPacketCount() {
@@ -161,6 +172,37 @@ void testLookupMacVendorUsesLocalOuiFile() {
     expect(!unknownVendor.has_value(), "expected unknown OUI to return no vendor");
 
     std::remove(path);
+}
+
+void testWriteToStreamsMirrorsMessage() {
+    std::ostringstream primary;
+    std::ostringstream secondary;
+
+    writeToStreams("hello\n", &primary, &secondary);
+
+    expect(primary.str() == "hello\n", "expected primary stream to receive message");
+    expect(secondary.str() == "hello\n", "expected secondary stream to receive message");
+}
+
+void testFormatInferenceReportIncludesSummary() {
+    Config cfg;
+    cfg.ifname = "eth7";
+    Observation obs;
+    obs.macCount["00:16:3e:aa:bb:cc"] = 3;
+    obs.srcIpCount["192.168.50.23"] = 2;
+    obs.arpGatewayCount["192.168.50.1"] = 1;
+    obs.linkLocalProbes.insert("169.254.44.55");
+    obs.sawSSDP = true;
+
+    const std::string report = formatInferenceReport(cfg, 7, obs);
+
+    expect(report.find("Captured packets: 7\n") != std::string::npos, "expected packet count in report");
+    expect(report.find("Likely device MAC: 00:16:3e:aa:bb:cc\n") != std::string::npos, "expected device MAC in report");
+    expect(report.find("Likely device IP: 192.168.50.23\n") != std::string::npos, "expected device IP in report");
+    expect(report.find("Likely gateway IP: 192.168.50.1\n") != std::string::npos, "expected gateway IP in report");
+    expect(report.find("Link-local probe(s):\n  - 169.254.44.55\n") != std::string::npos, "expected link-local probe list in report");
+    expect(report.find("SSDP observed: yes\n") != std::string::npos, "expected SSDP summary in report");
+    expect(report.find("sudo ip addr add 192.168.50.10/24 dev eth7\n") != std::string::npos, "expected suggested local address in report");
 }
 
 void testInterfacePollAttemptsCoversTimeoutWindow() {
@@ -249,11 +291,14 @@ int main() {
         void (*fn)();
     } tests[] = {
         {"parseArgs accepts flags and positional interface", testParseArgsAcceptsFlagsAndPositionalInterface},
+        {"parseArgs accepts custom output path", testParseArgsAcceptsCustomOutputPath},
         {"parseArgs rejects invalid packet count", testParseArgsRejectsInvalidPacketCount},
         {"suggestLocalTestAddress uses device or gateway subnet", testSuggestLocalTestAddressUsesDeviceOrGatewaySubnet},
         {"normalizeOuiPrefix accepts MAC formats", testNormalizeOuiPrefixAcceptsMacFormats},
         {"parseOuiLine extracts vendor entry", testParseOuiLineExtractsVendorEntry},
         {"lookupMacVendor uses local OUI file", testLookupMacVendorUsesLocalOuiFile},
+        {"writeToStreams mirrors message", testWriteToStreamsMirrorsMessage},
+        {"formatInferenceReport includes summary", testFormatInferenceReportIncludesSummary},
         {"interfacePollAttempts covers timeout window", testInterfacePollAttemptsCoversTimeoutWindow},
         {"waitForInterface returns when interface appears", testWaitForInterfaceReturnsWhenInterfaceAppears},
         {"waitForInterface times out cleanly", testWaitForInterfaceTimesOutCleanly},

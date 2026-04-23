@@ -17,6 +17,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <ctime>
 #include <thread>
 #include <map>
 #include <optional>
@@ -38,6 +39,7 @@ struct Config {
     std::string ifname;
     int maxPackets = 200;
     int timeoutSec = 30;
+    std::string outputPath = "infer_iot_raw.log";
 };
 
 static void printHelp(const char* prog) {
@@ -52,14 +54,17 @@ static void printHelp(const char* prog) {
         << "  -i, --interface <name>   Network interface to listen on\n"
         << "  -n, --packets <count>    Maximum number of packets to capture (default: 200)\n"
         << "  -t, --timeout <sec>      Stop after timeout in seconds (default: 30)\n"
+        << "  -o, --output <path>      Log file path (default: infer_iot_raw.log)\n"
         << "  -h, --help               Show this help message\n\n"
         << "Examples:\n"
         << "  sudo " << prog << " eth1\n"
-        << "  sudo " << prog << " -i eth1 -n 100 -t 15\n\n"
+        << "  sudo " << prog << " -i eth1 -n 100 -t 15\n"
+        << "  sudo " << prog << " -i eth1 -o capture.log\n\n"
         << "Notes:\n"
         << "  - Requires Linux.\n"
         << "  - Requires root or CAP_NET_RAW.\n"
-        << "  - Best results come from starting capture, then power-cycling the IoT device.\n";
+        << "  - Best results come from starting capture, then power-cycling the IoT device.\n"
+        << "  - Appends normal run output to the selected log file.\n";
 }
 
 static bool parseInt(const std::string& s, int& value) {
@@ -109,6 +114,18 @@ static bool parseArgs(int argc, char* argv[], Config& cfg) {
             }
             if (!parseInt(argv[++i], cfg.timeoutSec) || cfg.timeoutSec <= 0) {
                 std::cerr << "Invalid timeout\n\n";
+                printHelp(argv[0]);
+                return false;
+            }
+        } else if (arg == "-o" || arg == "--output") {
+            if (i + 1 >= argc) {
+                std::cerr << "Missing value for " << arg << "\n\n";
+                printHelp(argv[0]);
+                return false;
+            }
+            cfg.outputPath = argv[++i];
+            if (cfg.outputPath.empty()) {
+                std::cerr << "Invalid output path\n\n";
                 printHelp(argv[0]);
                 return false;
             }
@@ -318,6 +335,72 @@ static std::optional<std::string> lookupMacVendor(
     return std::nullopt;
 }
 
+static void writeToStreams(
+    const std::string& message,
+    std::ostream* primary,
+    std::ostream* secondary = nullptr) {
+    if (primary) {
+        *primary << message;
+    }
+    if (secondary) {
+        *secondary << message;
+    }
+}
+
+static std::string currentLocalTimestamp() {
+    const std::time_t now = std::time(nullptr);
+    std::tm tm {};
+    localtime_r(&now, &tm);
+
+    char buf[32] = {0};
+    if (std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm) == 0) {
+        return "unknown-time";
+    }
+    return buf;
+}
+
+static std::string formatInferenceReport(const Config& cfg, int captured, const Observation& obs) {
+    const auto deviceMac = mostFrequent(obs.macCount);
+    const auto deviceIp = mostFrequent(obs.srcIpCount);
+    const auto gatewayIp = mostFrequent(obs.arpGatewayCount);
+    const auto deviceVendor = deviceMac ? lookupMacVendor(*deviceMac) : std::nullopt;
+    const auto suggestedLocalIp = suggestLocalTestAddress(deviceIp, gatewayIp);
+
+    std::ostringstream out;
+    out << "\nInference result\n";
+    out << "================\n";
+    out << "Captured packets: " << captured << "\n";
+    out << "Likely device MAC: " << (deviceMac ? *deviceMac : "unknown") << "\n";
+    if (deviceVendor) {
+        out << "Likely device vendor: " << *deviceVendor << "\n";
+    }
+    out << "Likely device IP: " << (deviceIp ? *deviceIp : "unknown") << "\n";
+    out << "Likely gateway IP: " << (gatewayIp ? *gatewayIp : "unknown") << "\n";
+
+    if (!obs.linkLocalProbes.empty()) {
+        out << "Link-local probe(s):\n";
+        for (const auto& ip : obs.linkLocalProbes) {
+            out << "  - " << ip << "\n";
+        }
+    } else {
+        out << "Link-local probe(s): none seen\n";
+    }
+
+    out << "SSDP observed: " << (obs.sawSSDP ? "yes" : "no") << "\n";
+
+    if (suggestedLocalIp) {
+        out << "\nSuggested next test:\n";
+        out << "  sudo ip addr flush dev " << cfg.ifname << "\n";
+        out << "  sudo ip addr add " << *suggestedLocalIp << " dev " << cfg.ifname << "\n";
+        out << "  sudo ip link set " << cfg.ifname << " up\n";
+        if (isUsableIpv4(deviceIp)) {
+            out << "  ping -I " << cfg.ifname << " " << *deviceIp << "\n";
+        }
+    }
+
+    return out.str();
+}
+
 static constexpr auto kInterfacePollInterval = std::chrono::milliseconds(250);
 
 static int interfacePollAttempts(int timeoutSec) {
@@ -332,7 +415,8 @@ static std::optional<int> waitForInterface(
     int attempts,
     Resolver&& resolver,
     Sleeper&& sleeper,
-    std::ostream* statusStream = nullptr) {
+    std::ostream* statusStream = nullptr,
+    std::ostream* logStream = nullptr) {
     bool announcedWait = false;
 
     for (int attempt = 0; attempt < attempts; ++attempt) {
@@ -346,7 +430,7 @@ static std::optional<int> waitForInterface(
         }
 
         if (statusStream && !announcedWait) {
-            *statusStream << "Waiting for interface " << ifname << " to appear...\n";
+            writeToStreams("Waiting for interface " + ifname + " to appear...\n", statusStream, logStream);
             announcedWait = true;
         }
 
@@ -439,6 +523,18 @@ int main(int argc, char* argv[]) {
         return (argc > 1 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help")) ? 0 : 1;
     }
 
+    errno = 0;
+    std::ofstream logFile(cfg.outputPath, std::ios::app);
+    std::ostream* logStream = nullptr;
+    if (!logFile) {
+        const int logOpenErrno = errno;
+        std::cerr << "Warning: failed to open log file '" << cfg.outputPath
+                  << "': " << std::strerror(logOpenErrno) << "\n";
+    } else {
+        logStream = &logFile;
+        *logStream << "=== infer_iot_raw run at " << currentLocalTimestamp() << " ===\n";
+    }
+
     int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (fd < 0) {
         std::cerr << "socket() failed: " << std::strerror(errno) << "\n";
@@ -450,7 +546,8 @@ int main(int argc, char* argv[]) {
         interfacePollAttempts(cfg.timeoutSec),
         [](const char* ifname) { return if_nametoindex(ifname); },
         []() { std::this_thread::sleep_for(kInterfacePollInterval); },
-        &std::cout);
+        &std::cout,
+        logStream);
     if (!ifindex) {
         std::cerr << "Interface did not appear within timeout: " << cfg.ifname << "\n";
         close(fd);
@@ -475,9 +572,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "Listening on " << cfg.ifname
-              << " for up to " << cfg.maxPackets
-              << " packets or " << cfg.timeoutSec << " seconds...\n";
+    {
+        std::ostringstream status;
+        status << "Listening on " << cfg.ifname
+               << " for up to " << cfg.maxPackets
+               << " packets or " << cfg.timeoutSec << " seconds...\n";
+        writeToStreams(status.str(), &std::cout, logStream);
+    }
 
     Observation obs;
     std::vector<uint8_t> buf(65536);
@@ -487,7 +588,7 @@ int main(int argc, char* argv[]) {
     while (captured < cfg.maxPackets) {
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) {
-            std::cout << "Timeout reached.\n";
+            writeToStreams("Timeout reached.\n", &std::cout, logStream);
             break;
         }
 
@@ -510,7 +611,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         if (rc == 0) {
-            std::cout << "Timeout reached.\n";
+            writeToStreams("Timeout reached.\n", &std::cout, logStream);
             break;
         }
 
@@ -546,41 +647,10 @@ int main(int argc, char* argv[]) {
 
     close(fd);
 
-    auto deviceMac = mostFrequent(obs.macCount);
-    auto deviceIp = mostFrequent(obs.srcIpCount);
-    auto gatewayIp = mostFrequent(obs.arpGatewayCount);
-    const auto deviceVendor = deviceMac ? lookupMacVendor(*deviceMac) : std::nullopt;
-
-    std::cout << "\nInference result\n";
-    std::cout << "================\n";
-    std::cout << "Captured packets: " << captured << "\n";
-    std::cout << "Likely device MAC: " << (deviceMac ? *deviceMac : "unknown") << "\n";
-    if (deviceVendor) {
-        std::cout << "Likely device vendor: " << *deviceVendor << "\n";
-    }
-    std::cout << "Likely device IP: " << (deviceIp ? *deviceIp : "unknown") << "\n";
-    std::cout << "Likely gateway IP: " << (gatewayIp ? *gatewayIp : "unknown") << "\n";
-
-    if (!obs.linkLocalProbes.empty()) {
-        std::cout << "Link-local probe(s):\n";
-        for (const auto& ip : obs.linkLocalProbes) {
-            std::cout << "  - " << ip << "\n";
-        }
-    } else {
-        std::cout << "Link-local probe(s): none seen\n";
-    }
-
-    std::cout << "SSDP observed: " << (obs.sawSSDP ? "yes" : "no") << "\n";
-
-    const auto suggestedLocalIp = suggestLocalTestAddress(deviceIp, gatewayIp);
-    if (suggestedLocalIp) {
-        std::cout << "\nSuggested next test:\n";
-        std::cout << "  sudo ip addr flush dev " << cfg.ifname << "\n";
-        std::cout << "  sudo ip addr add " << *suggestedLocalIp << " dev " << cfg.ifname << "\n";
-        std::cout << "  sudo ip link set " << cfg.ifname << " up\n";
-        if (isUsableIpv4(deviceIp)) {
-            std::cout << "  ping -I " << cfg.ifname << " " << *deviceIp << "\n";
-        }
+    writeToStreams(formatInferenceReport(cfg, captured, obs), &std::cout, logStream);
+    if (logStream) {
+        *logStream << "\n";
+        logFile.flush();
     }
 
     return 0;

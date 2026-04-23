@@ -23,6 +23,7 @@ This tool is most useful when you need to answer questions like:
 - Infers a likely gateway IP address from ARP traffic
 - Detects link-local probing activity during device discovery
 - Detects SSDP traffic to `239.255.255.250:1900` during early device startup
+- Appends normal run output to `infer_iot_raw.log` in the current directory by default
 - Supports Bash autocompletion for flags and interface names
 
 ## Requirements
@@ -84,15 +85,24 @@ Or with explicit options:
 sudo ./bin/infer_iot_raw -i eth1 -n 100 -t 15
 ```
 
+Or choose a custom log filename:
+
+```bash
+sudo ./bin/infer_iot_raw -i eth1 -o my-capture.log
+```
+
 If the named interface is not present yet, the program waits for it to appear for up to the configured timeout, then starts capture once the interface exists.
 
 If the system has an IEEE OUI database installed, the output also includes a likely vendor name for the inferred device MAC.
+
+By default, normal run output is also appended to `./infer_iot_raw.log`. Use `-o` or `--output` to change the log filename or path.
 
 Supported options:
 
 - `-i`, `--interface <name>`: network interface to listen on
 - `-n`, `--packets <count>`: maximum packets to capture
 - `-t`, `--timeout <sec>`: stop after the given timeout
+- `-o`, `--output <path>`: log file path, default `infer_iot_raw.log`
 - `-h`, `--help`: show help output
 
 Example output:
@@ -148,7 +158,7 @@ make install-bash-completion
 
 The completion script supports:
 
-- option completion for `-h`, `--help`, `-i`, `--interface`, `-n`, `--packets`, `-t`, `--timeout`
+- option completion for `-h`, `--help`, `-i`, `--interface`, `-n`, `--packets`, `-t`, `--timeout`, `-o`, `--output`
 - interface-name completion from `/sys/class/net`
 - command completion for `infer_iot_raw`, `./infer_iot_raw`, `bin/infer_iot_raw`, and `./bin/infer_iot_raw`
 
