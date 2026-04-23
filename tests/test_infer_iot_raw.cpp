@@ -184,6 +184,12 @@ void testWriteToStreamsMirrorsMessage() {
     expect(secondary.str() == "hello\n", "expected secondary stream to receive message");
 }
 
+void testFormatRunTimestampLineUsesExpectedPrefix() {
+    expect(
+        formatRunTimestampLine("2026-04-22 10:11:12") == "Timestamp: 2026-04-22 10:11:12\n",
+        "expected startup timestamp line to use the documented format");
+}
+
 void testFormatInferenceReportIncludesSummary() {
     Config cfg;
     cfg.ifname = "eth7";
@@ -298,6 +304,7 @@ int main() {
         {"parseOuiLine extracts vendor entry", testParseOuiLineExtractsVendorEntry},
         {"lookupMacVendor uses local OUI file", testLookupMacVendorUsesLocalOuiFile},
         {"writeToStreams mirrors message", testWriteToStreamsMirrorsMessage},
+        {"formatRunTimestampLine uses expected prefix", testFormatRunTimestampLineUsesExpectedPrefix},
         {"formatInferenceReport includes summary", testFormatInferenceReportIncludesSummary},
         {"interfacePollAttempts covers timeout window", testInterfacePollAttemptsCoversTimeoutWindow},
         {"waitForInterface returns when interface appears", testWaitForInterfaceReturnsWhenInterfaceAppears},

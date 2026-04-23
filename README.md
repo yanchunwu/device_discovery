@@ -109,6 +109,7 @@ Example output:
 
 ```text
 ./infer_iot_raw --interface eth1
+Timestamp: 2026-04-22 10:11:12
 Listening on eth1 for up to 200 packets or 30 seconds...
 
 Inference result

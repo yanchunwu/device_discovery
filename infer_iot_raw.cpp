@@ -359,6 +359,10 @@ static std::string currentLocalTimestamp() {
     return buf;
 }
 
+static std::string formatRunTimestampLine(const std::string& timestamp) {
+    return "Timestamp: " + timestamp + "\n";
+}
+
 static std::string formatInferenceReport(const Config& cfg, int captured, const Observation& obs) {
     const auto deviceMac = mostFrequent(obs.macCount);
     const auto deviceIp = mostFrequent(obs.srcIpCount);
@@ -523,6 +527,8 @@ int main(int argc, char* argv[]) {
         return (argc > 1 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help")) ? 0 : 1;
     }
 
+    const std::string runTimestamp = currentLocalTimestamp();
+
     errno = 0;
     std::ofstream logFile(cfg.outputPath, std::ios::app);
     std::ostream* logStream = nullptr;
@@ -534,6 +540,8 @@ int main(int argc, char* argv[]) {
         logStream = &logFile;
         *logStream << "=== infer_iot_raw run at " << currentLocalTimestamp() << " ===\n";
     }
+
+    writeToStreams(formatRunTimestampLine(runTimestamp), &std::cout, logStream);
 
     int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (fd < 0) {
