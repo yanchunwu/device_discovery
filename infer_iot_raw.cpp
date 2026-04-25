@@ -410,6 +410,7 @@ static std::string formatInferenceReport(const Config& cfg, int captured, const 
         if (isUsableIpv4(deviceIp)) {
             out << "  ping -I " << cfg.ifname << " " << *deviceIp << "\n";
         }
+        out << "================\n\n";
     }
 
     return out.str();
