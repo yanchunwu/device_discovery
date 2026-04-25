@@ -202,10 +202,10 @@ The completion script supports:
 
 The repository includes a helper script at `scripts/setup-systemd-service.sh` that installs the recommended hardened template unit using a dedicated `inferiot` service account.
 
-Build the binary first:
+Install the binary first:
 
 ```bash
-make
+sudo make install
 ```
 
 Then run the setup script. Pass the interface name as the first argument if you do not want the default `enx000ec6bc22b0`:
@@ -214,6 +214,12 @@ Then run the setup script. Pass the interface name as the first argument if you 
 chmod +x scripts/setup-systemd-service.sh
 ./scripts/setup-systemd-service.sh
 ./scripts/setup-systemd-service.sh enx000ec6bc22b0
+```
+
+If the binary is installed somewhere non-standard, override it explicitly when invoking the script:
+
+```bash
+BINARY=/path/to/infer_iot_raw ./scripts/setup-systemd-service.sh enx000ec6bc22b0
 ```
 
 The script writes:

@@ -6,16 +6,25 @@ SERVICE_GROUP="inferiot"
 SERVICE_HOME="/var/lib/infer_iot_raw"
 DEFAULTS_FILE="/etc/default/infer_iot_raw"
 UNIT_FILE="/etc/systemd/system/infer_iot_raw@.service"
-BINARY="/opt/bg/device_discovery/bin/infer_iot_raw"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_BINARY="${REPO_ROOT}/bin/infer_iot_raw"
+BINARY="${BINARY:-$(command -v infer_iot_raw 2>/dev/null || true)}"
 INTERFACE="${1:-enx000ec6bc22b0}"
 PACKETS="${PACKETS:-1000000}"
 TIMEOUT="${TIMEOUT:-3600}"
 
+if [[ -z "$BINARY" && -x "$REPO_BINARY" ]]; then
+  BINARY="$REPO_BINARY"
+fi
+
 if [[ ! -x "$BINARY" ]]; then
   echo "Binary not found or not executable: $BINARY" >&2
-  echo "Build it first with: make" >&2
+  echo "Install it first with: sudo make install" >&2
+  echo "Or override the path explicitly with: BINARY=/path/to/infer_iot_raw $0 [interface]" >&2
   exit 1
 fi
+
+BINARY="$(readlink -f "$BINARY")"
 
 if ! command -v systemctl >/dev/null 2>&1; then
   echo "systemctl is required to install the service" >&2
@@ -34,7 +43,7 @@ PACKETS=$PACKETS
 TIMEOUT=$TIMEOUT
 EOF
 
-sudo tee "$UNIT_FILE" >/dev/null <<'EOF'
+sudo tee "$UNIT_FILE" >/dev/null <<EOF
 [Unit]
 Description=Infer IoT device details from raw Ethernet traffic on %I
 After=network-online.target
@@ -46,7 +55,7 @@ User=inferiot
 Group=inferiot
 WorkingDirectory=/var/lib/infer_iot_raw
 EnvironmentFile=/etc/default/infer_iot_raw
-ExecStart=/opt/bg/device_discovery/bin/infer_iot_raw -i %I -n ${PACKETS} -t ${TIMEOUT} -o /var/lib/infer_iot_raw/infer_iot_raw-%I.log
+ExecStart=${BINARY} -i %I -n \${PACKETS} -t \${TIMEOUT} -o ${SERVICE_HOME}/infer_iot_raw-%I.log
 Restart=always
 RestartSec=2
 
