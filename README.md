@@ -68,6 +68,8 @@ sudo make install
 
 The default install path is `/usr/local/bin/infer_iot_raw`.
 
+`sudo make install` also applies `cap_net_raw` to the installed binary so it can open raw sockets without requiring a separate manual `setcap` step.
+
 To choose a different install prefix:
 
 ```bash
@@ -81,7 +83,7 @@ To stage an install into a packaging or rootfs directory:
 make install DESTDIR=/tmp/pkgroot PREFIX=/usr
 ```
 
-To grant the built binary raw-socket capability so it can later run without full root privileges:
+To re-apply the raw-socket capability to the installed binary after installation:
 
 ```bash
 sudo make install-cap
