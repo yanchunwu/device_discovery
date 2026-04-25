@@ -35,9 +35,14 @@ clean:
 
 install: $(TARGET)
 	install -Dm755 $(TARGET) $(INSTALL_DEST)
+ifneq ($(strip $(DESTDIR)),)
+	@echo "Skipping setcap for staged install at $(INSTALL_DEST)"
+else
+	setcap cap_net_raw+ep $(INSTALL_DEST)
+endif
 
-install-cap: $(TARGET)
-	setcap cap_net_raw+ep $(TARGET)
+install-cap:
+	setcap cap_net_raw+ep $(INSTALL_DEST)
 
 install-bash-completion: $(COMPLETION_SRC)
 	install -Dm644 $(COMPLETION_SRC) $(COMPLETION_DEST)
