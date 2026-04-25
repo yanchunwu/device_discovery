@@ -24,6 +24,7 @@ This tool is most useful when you need to answer questions like:
 - Detects link-local probing activity during device discovery
 - Detects SSDP traffic to `239.255.255.250:1900` during early device startup
 - Appends normal run output to `infer_iot_raw.log` in the current directory by default
+- Supports built-in size-based log rotation with configurable archive retention
 - Can repeat capture sessions indefinitely with `--loop`
 - Supports Bash autocompletion for flags and interface names
 
@@ -115,6 +116,12 @@ Or choose a custom log filename:
 sudo ./bin/infer_iot_raw -i eth1 -o my-capture.log
 ```
 
+Or keep a bounded set of rotated logs:
+
+```bash
+sudo ./bin/infer_iot_raw -i eth1 -o my-capture.log --rotate-size 10M --retain 7
+```
+
 Or keep running capture sessions forever:
 
 ```bash
@@ -127,6 +134,8 @@ If the system has an IEEE OUI database installed, the output also includes a lik
 
 By default, normal run output is also appended to `./infer_iot_raw.log`. Use `-o` or `--output` to change the log filename or path.
 
+Use `--rotate-size` to enable built-in size-based rotation. When the current log would exceed that size, the tool renames the existing file to `.1`, shifts older archives to `.2`, `.3`, and so on, and keeps the number of rotated files specified by `--retain`.
+
 Use `-l` or `--loop` to restart capture automatically after each inference report instead of exiting.
 
 Supported options:
@@ -135,6 +144,8 @@ Supported options:
 - `-n`, `--packets <count>`: maximum packets to capture
 - `-t`, `--timeout <sec>`: stop after the given timeout
 - `-o`, `--output <path>`: log file path, default `infer_iot_raw.log`
+- `--rotate-size <size>`: rotate the log before it grows beyond this size, for example `10M`; default `0` disables rotation
+- `--retain <count>`: number of rotated log files to keep when rotation is enabled; default `5`
 - `-l`, `--loop`: repeat capture sessions forever
 - `-h`, `--help`: show help output
 
@@ -196,7 +207,7 @@ You can also override the install location or stage the completion file with the
 
 The completion script supports:
 
-- option completion for `-h`, `--help`, `-i`, `--interface`, `-n`, `--packets`, `-t`, `--timeout`, `-o`, `--output`, `-l`, `--loop`
+- option completion for `-h`, `--help`, `-i`, `--interface`, `-n`, `--packets`, `-t`, `--timeout`, `-o`, `--output`, `--rotate-size`, `--retain`, `-l`, `--loop`
 - interface-name completion from `/sys/class/net`
 - command completion for `infer_iot_raw`, `./infer_iot_raw`, `bin/infer_iot_raw`, and `./bin/infer_iot_raw`
 
@@ -226,14 +237,16 @@ BINARY=/path/to/infer_iot_raw ./scripts/setup-systemd-service.sh enx000ec6bc22b0
 
 The script writes:
 
-- `/etc/default/infer_iot_raw` with `PACKETS` and `TIMEOUT`
+- `/etc/default/infer_iot_raw` with `PACKETS`, `TIMEOUT`, `ROTATE_SIZE`, and `RETAIN_COUNT`
 - `/etc/systemd/system/infer_iot_raw@.service` as a template unit
 - `/var/lib/infer_iot_raw/infer_iot_raw-<interface>.log` as the runtime log path
 
-You can override the packet and timeout defaults when invoking the script:
+The generated service enables built-in log rotation by default with `ROTATE_SIZE=10M` and `RETAIN_COUNT=7`.
+
+You can override the packet, timeout, and retention defaults when invoking the script:
 
 ```bash
-PACKETS=500000 TIMEOUT=1800 ./scripts/setup-systemd-service.sh enx000ec6bc22b0
+PACKETS=500000 TIMEOUT=1800 ROTATE_SIZE=25M RETAIN_COUNT=14 ./scripts/setup-systemd-service.sh enx000ec6bc22b0
 ```
 
 ## Typical Workflow

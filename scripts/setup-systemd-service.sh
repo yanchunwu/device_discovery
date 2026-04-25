@@ -12,6 +12,8 @@ BINARY="${BINARY:-$(command -v infer_iot_raw 2>/dev/null || true)}"
 INTERFACE="${1:-enx000ec6bc22b0}"
 PACKETS="${PACKETS:-100}"
 TIMEOUT="${TIMEOUT:-10}"
+ROTATE_SIZE="${ROTATE_SIZE:-10M}"
+RETAIN_COUNT="${RETAIN_COUNT:-7}"
 
 if [[ -z "$BINARY" && -x "$REPO_BINARY" ]]; then
   BINARY="$REPO_BINARY"
@@ -41,6 +43,8 @@ sudo chown -R "$SERVICE_USER:$SERVICE_GROUP" "$SERVICE_HOME"
 sudo tee "$DEFAULTS_FILE" >/dev/null <<EOF
 PACKETS=$PACKETS
 TIMEOUT=$TIMEOUT
+ROTATE_SIZE=$ROTATE_SIZE
+RETAIN_COUNT=$RETAIN_COUNT
 EOF
 
 sudo tee "$UNIT_FILE" >/dev/null <<EOF
@@ -55,7 +59,7 @@ User=inferiot
 Group=inferiot
 WorkingDirectory=/var/lib/infer_iot_raw
 EnvironmentFile=/etc/default/infer_iot_raw
-ExecStart=${BINARY} -l -i %I -n \${PACKETS} -t \${TIMEOUT} -o ${SERVICE_HOME}/infer_iot_raw-%I.log
+ExecStart=${BINARY} -l -i %I -n \${PACKETS} -t \${TIMEOUT} -o ${SERVICE_HOME}/infer_iot_raw-%I.log --rotate-size \${ROTATE_SIZE} --retain \${RETAIN_COUNT}
 Restart=always
 RestartSec=2
 

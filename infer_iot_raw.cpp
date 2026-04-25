@@ -14,16 +14,20 @@
 #include <cstring>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <ctime>
+#include <limits>
 #include <thread>
 #include <map>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -40,6 +44,8 @@ struct Config {
     int maxPackets = 200;
     int timeoutSec = 30;
     std::string outputPath = "infer_iot_raw.log";
+    std::uintmax_t rotateBytes = 0;
+    int retainCount = 5;
     bool loopForever = false;
 };
 
@@ -56,18 +62,22 @@ static void printHelp(const char* prog) {
         << "  -n, --packets <count>    Maximum number of packets to capture (default: 200)\n"
         << "  -t, --timeout <sec>      Stop after timeout in seconds (default: 30)\n"
         << "  -o, --output <path>      Log file path (default: infer_iot_raw.log)\n"
+        << "      --rotate-size <size> Rotate the log when it would exceed this size; 0 disables rotation\n"
+        << "      --retain <count>     Number of rotated log files to keep (default: 5)\n"
         << "  -l, --loop               Repeat capture sessions forever\n"
         << "  -h, --help               Show this help message\n\n"
         << "Examples:\n"
         << "  sudo " << prog << " eth1\n"
         << "  sudo " << prog << " -i eth1 -n 100 -t 15\n"
         << "  sudo " << prog << " -i eth1 -o capture.log\n"
+        << "  sudo " << prog << " -i eth1 -o capture.log --rotate-size 10M --retain 7\n"
         << "  sudo " << prog << " -i eth1 --loop\n\n"
         << "Notes:\n"
         << "  - Requires Linux.\n"
         << "  - Requires root or CAP_NET_RAW.\n"
         << "  - Best results come from starting capture, then power-cycling the IoT device.\n"
         << "  - Appends normal run output to the selected log file.\n"
+        << "  - Rotation uses suffixes like .1, .2, and supports K, M, G, or T size suffixes.\n"
         << "  - Loop mode reruns capture sessions until interrupted.\n";
 }
 
@@ -83,6 +93,54 @@ static bool parseInt(const std::string& s, int& value) {
     } catch (...) {
         return false;
     }
+}
+
+static bool parseByteSize(const std::string& s, std::uintmax_t& value) {
+    if (s.empty()) {
+        return false;
+    }
+
+    size_t idx = 0;
+    while (idx < s.size() && std::isdigit(static_cast<unsigned char>(s[idx]))) {
+        ++idx;
+    }
+    if (idx == 0) {
+        return false;
+    }
+
+    unsigned long long base = 0;
+    try {
+        base = std::stoull(s.substr(0, idx));
+    } catch (...) {
+        return false;
+    }
+
+    std::string suffix = s.substr(idx);
+    for (char& ch : suffix) {
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    }
+
+    std::uintmax_t multiplier = 1;
+    if (suffix.empty() || suffix == "B") {
+        multiplier = 1;
+    } else if (suffix == "K" || suffix == "KB") {
+        multiplier = 1024ull;
+    } else if (suffix == "M" || suffix == "MB") {
+        multiplier = 1024ull * 1024ull;
+    } else if (suffix == "G" || suffix == "GB") {
+        multiplier = 1024ull * 1024ull * 1024ull;
+    } else if (suffix == "T" || suffix == "TB") {
+        multiplier = 1024ull * 1024ull * 1024ull * 1024ull;
+    } else {
+        return false;
+    }
+
+    if (base > std::numeric_limits<std::uintmax_t>::max() / multiplier) {
+        return false;
+    }
+
+    value = static_cast<std::uintmax_t>(base) * multiplier;
+    return true;
 }
 
 static bool parseArgs(int argc, char* argv[], Config& cfg) {
@@ -130,6 +188,28 @@ static bool parseArgs(int argc, char* argv[], Config& cfg) {
             cfg.outputPath = argv[++i];
             if (cfg.outputPath.empty()) {
                 std::cerr << "Invalid output path\n\n";
+                printHelp(argv[0]);
+                return false;
+            }
+        } else if (arg == "--rotate-size") {
+            if (i + 1 >= argc) {
+                std::cerr << "Missing value for " << arg << "\n\n";
+                printHelp(argv[0]);
+                return false;
+            }
+            if (!parseByteSize(argv[++i], cfg.rotateBytes)) {
+                std::cerr << "Invalid rotate size\n\n";
+                printHelp(argv[0]);
+                return false;
+            }
+        } else if (arg == "--retain") {
+            if (i + 1 >= argc) {
+                std::cerr << "Missing value for " << arg << "\n\n";
+                printHelp(argv[0]);
+                return false;
+            }
+            if (!parseInt(argv[++i], cfg.retainCount) || cfg.retainCount < 0) {
+                std::cerr << "Invalid retain count\n\n";
                 printHelp(argv[0]);
                 return false;
             }
@@ -341,7 +421,7 @@ static std::optional<std::string> lookupMacVendor(
     return std::nullopt;
 }
 
-static void writeToStreams(
+[[maybe_unused]] static void writeToStreams(
     const std::string& message,
     std::ostream* primary,
     std::ostream* secondary = nullptr) {
@@ -350,6 +430,233 @@ static void writeToStreams(
     }
     if (secondary) {
         *secondary << message;
+    }
+}
+
+static std::filesystem::path rotatedLogPath(const std::filesystem::path& path, int index) {
+    return std::filesystem::path(path.string() + "." + std::to_string(index));
+}
+
+static bool rotateLogFiles(
+    const std::filesystem::path& path,
+    int retainCount,
+    std::string* errorMessage = nullptr) {
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec) {
+        if (errorMessage) {
+            *errorMessage = "failed to inspect log file '" + path.string() + "': " + ec.message();
+        }
+        return false;
+    }
+    if (!exists) {
+        return true;
+    }
+
+    if (retainCount <= 0) {
+        std::filesystem::remove(path, ec);
+        if (ec) {
+            if (errorMessage) {
+                *errorMessage = "failed to remove log file '" + path.string() + "': " + ec.message();
+            }
+            return false;
+        }
+        return true;
+    }
+
+    const auto oldest = rotatedLogPath(path, retainCount);
+    std::filesystem::remove(oldest, ec);
+    if (ec) {
+        if (errorMessage) {
+            *errorMessage = "failed to remove rotated log file '" + oldest.string() + "': " + ec.message();
+        }
+        return false;
+    }
+
+    for (int i = retainCount - 1; i >= 1; --i) {
+        const auto source = rotatedLogPath(path, i);
+        if (!std::filesystem::exists(source, ec)) {
+            if (ec) {
+                if (errorMessage) {
+                    *errorMessage = "failed to inspect rotated log file '" + source.string() + "': " + ec.message();
+                }
+                return false;
+            }
+            continue;
+        }
+
+        const auto target = rotatedLogPath(path, i + 1);
+        std::filesystem::remove(target, ec);
+        if (ec) {
+            if (errorMessage) {
+                *errorMessage = "failed to replace rotated log file '" + target.string() + "': " + ec.message();
+            }
+            return false;
+        }
+
+        std::filesystem::rename(source, target, ec);
+        if (ec) {
+            if (errorMessage) {
+                *errorMessage = "failed to rename '" + source.string() + "' to '" + target.string() + "': " + ec.message();
+            }
+            return false;
+        }
+    }
+
+    const auto firstArchive = rotatedLogPath(path, 1);
+    std::filesystem::remove(firstArchive, ec);
+    if (ec) {
+        if (errorMessage) {
+            *errorMessage = "failed to replace rotated log file '" + firstArchive.string() + "': " + ec.message();
+        }
+        return false;
+    }
+
+    std::filesystem::rename(path, firstArchive, ec);
+    if (ec) {
+        if (errorMessage) {
+            *errorMessage = "failed to rotate log file '" + path.string() + "': " + ec.message();
+        }
+        return false;
+    }
+
+    return true;
+}
+
+class RotatingLog {
+public:
+    explicit RotatingLog(const Config& cfg, std::ostream* errorStream = &std::cerr)
+        : path_(cfg.outputPath),
+          rotateBytes_(cfg.rotateBytes),
+          retainCount_(cfg.retainCount),
+          errorStream_(errorStream) {
+        openForAppend();
+    }
+
+    void write(const std::string& message) {
+        if (path_.empty()) {
+            return;
+        }
+        if (!ensureOpen()) {
+            return;
+        }
+        if (rotateBytes_ > 0 && currentSize_ > 0 && currentSize_ + message.size() > rotateBytes_) {
+            if (!rotateNow()) {
+                return;
+            }
+        }
+
+        stream_ << message;
+        if (!stream_) {
+            warnOnce(writeErrorActive_, "failed to write log file '" + path_.string() + "'");
+            stream_.close();
+            stream_.clear();
+            return;
+        }
+
+        writeErrorActive_ = false;
+        currentSize_ += message.size();
+    }
+
+    void flush() {
+        if (stream_) {
+            stream_.flush();
+        }
+    }
+
+private:
+    bool ensureOpen() {
+        return stream_.is_open() || openForAppend();
+    }
+
+    bool openForAppend() {
+        currentSize_ = 0;
+        std::error_code ec;
+        if (std::filesystem::exists(path_, ec)) {
+            currentSize_ = std::filesystem::file_size(path_, ec);
+            if (ec) {
+                warnOnce(openErrorActive_, "failed to read log size for '" + path_.string() + "': " + ec.message());
+                currentSize_ = 0;
+            }
+        } else if (ec) {
+            warnOnce(openErrorActive_, "failed to inspect log file '" + path_.string() + "': " + ec.message());
+            return false;
+        }
+
+        stream_.close();
+        stream_.clear();
+        errno = 0;
+        stream_.open(path_, std::ios::app);
+        if (!stream_) {
+            const int savedErrno = errno;
+            warnOnce(openErrorActive_, "failed to open log file '" + path_.string() + "': " + std::strerror(savedErrno));
+            return false;
+        }
+
+        openErrorActive_ = false;
+        return true;
+    }
+
+    bool openFresh() {
+        stream_.close();
+        stream_.clear();
+        errno = 0;
+        stream_.open(path_, std::ios::out | std::ios::trunc);
+        if (!stream_) {
+            const int savedErrno = errno;
+            warnOnce(openErrorActive_, "failed to create rotated log file '" + path_.string() + "': " + std::strerror(savedErrno));
+            return false;
+        }
+
+        openErrorActive_ = false;
+        currentSize_ = 0;
+        return true;
+    }
+
+    bool rotateNow() {
+        stream_.close();
+        stream_.clear();
+
+        std::string errorMessage;
+        if (!rotateLogFiles(path_, retainCount_, &errorMessage)) {
+            warnOnce(rotationErrorActive_, errorMessage);
+            return openForAppend();
+        }
+
+        rotationErrorActive_ = false;
+        return openFresh();
+    }
+
+    void warnOnce(bool& active, const std::string& message) {
+        if (active) {
+            return;
+        }
+        active = true;
+        if (errorStream_) {
+            *errorStream_ << "Warning: " << message << "\n";
+        }
+    }
+
+    std::filesystem::path path_;
+    std::uintmax_t rotateBytes_ = 0;
+    int retainCount_ = 0;
+    std::uintmax_t currentSize_ = 0;
+    std::ofstream stream_;
+    std::ostream* errorStream_ = nullptr;
+    bool openErrorActive_ = false;
+    bool rotationErrorActive_ = false;
+    bool writeErrorActive_ = false;
+};
+
+static void writeToOutputs(
+    const std::string& message,
+    std::ostream* primary,
+    RotatingLog* log) {
+    if (primary) {
+        *primary << message;
+    }
+    if (log) {
+        log->write(message);
     }
 }
 
@@ -432,7 +739,7 @@ static std::optional<int> waitForInterface(
     Resolver&& resolver,
     Sleeper&& sleeper,
     std::ostream* statusStream = nullptr,
-    std::ostream* logStream = nullptr) {
+    RotatingLog* logStream = nullptr) {
     bool announcedWait = false;
 
     for (int attempt = 0; attempt < attempts; ++attempt) {
@@ -446,7 +753,7 @@ static std::optional<int> waitForInterface(
         }
 
         if (statusStream && !announcedWait) {
-            writeToStreams("Waiting for interface " + ifname + " to appear...\n", statusStream, logStream);
+            writeToOutputs("Waiting for interface " + ifname + " to appear...\n", statusStream, logStream);
             announcedWait = true;
         }
 
@@ -532,8 +839,8 @@ static void handleIpv4(const uint8_t* frame, ssize_t len, Observation& obs) {
     }
 }
 
-static int runCaptureSession(const Config& cfg, std::ostream* logStream) {
-    writeToStreams(formatRunTimestampLine(currentLocalTimestamp()), &std::cout, logStream);
+static int runCaptureSession(const Config& cfg, RotatingLog* logStream) {
+    writeToOutputs(formatRunTimestampLine(currentLocalTimestamp()), &std::cout, logStream);
 
     int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (fd < 0) {
@@ -577,7 +884,7 @@ static int runCaptureSession(const Config& cfg, std::ostream* logStream) {
         status << "Listening on " << cfg.ifname
                << " for up to " << cfg.maxPackets
                << " packets or " << cfg.timeoutSec << " seconds...\n";
-        writeToStreams(status.str(), &std::cout, logStream);
+        writeToOutputs(status.str(), &std::cout, logStream);
     }
 
     Observation obs;
@@ -588,7 +895,7 @@ static int runCaptureSession(const Config& cfg, std::ostream* logStream) {
     while (captured < cfg.maxPackets) {
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) {
-            writeToStreams("Timeout reached.\n", &std::cout, logStream);
+            writeToOutputs("Timeout reached.\n", &std::cout, logStream);
             break;
         }
 
@@ -611,7 +918,7 @@ static int runCaptureSession(const Config& cfg, std::ostream* logStream) {
             return 1;
         }
         if (rc == 0) {
-            writeToStreams("Timeout reached.\n", &std::cout, logStream);
+            writeToOutputs("Timeout reached.\n", &std::cout, logStream);
             break;
         }
 
@@ -647,7 +954,7 @@ static int runCaptureSession(const Config& cfg, std::ostream* logStream) {
 
     close(fd);
 
-    writeToStreams(formatInferenceReport(cfg, captured, obs), &std::cout, logStream);
+    writeToOutputs(formatInferenceReport(cfg, captured, obs), &std::cout, logStream);
 
     return 0;
 }
@@ -659,17 +966,9 @@ int main(int argc, char* argv[]) {
         return (argc > 1 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help")) ? 0 : 1;
     }
 
-    errno = 0;
-    std::ofstream logFile(cfg.outputPath, std::ios::app);
-    std::ostream* logStream = nullptr;
-    if (!logFile) {
-        const int logOpenErrno = errno;
-        std::cerr << "Warning: failed to open log file '" << cfg.outputPath
-                  << "': " << std::strerror(logOpenErrno) << "\n";
-    } else {
-        logStream = &logFile;
-        *logStream << "=== infer_iot_raw run at " << currentLocalTimestamp() << " ===\n";
-    }
+    RotatingLog logFile(cfg);
+    RotatingLog* logStream = &logFile;
+    logFile.write("=== infer_iot_raw run at " + currentLocalTimestamp() + " ===\n");
 
     do {
         if (runCaptureSession(cfg, logStream) != 0) {
@@ -680,18 +979,14 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-        writeToStreams(formatLoopContinuationLine(), &std::cout, logStream);
-        if (logStream) {
-            *logStream << "\n";
-            logFile.flush();
-        }
+        writeToOutputs(formatLoopContinuationLine(), &std::cout, logStream);
+        logFile.write("\n");
+        logFile.flush();
         std::this_thread::sleep_for(kLoopRestartDelay);
     } while (true);
 
-    if (logStream) {
-        *logStream << "\n";
-        logFile.flush();
-    }
+    logFile.write("\n");
+    logFile.flush();
 
     return 0;
 }

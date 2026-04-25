@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -32,6 +33,13 @@ std::vector<char*> makeArgv(std::vector<std::string>& args) {
         argv.push_back(arg.data());
     }
     return argv;
+}
+
+std::string readTextFile(const std::filesystem::path& path) {
+    std::ifstream input(path);
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
 }
 
 std::vector<uint8_t> buildArpRequest(
@@ -125,6 +133,17 @@ void testParseArgsAcceptsCustomOutputPath() {
     expect(cfg.outputPath == "capture.log", "expected custom output path to be parsed");
 }
 
+void testParseArgsAcceptsRotationPolicy() {
+    Config cfg;
+    std::vector<std::string> args = {
+        "infer_iot_raw", "-i", "eth0", "--rotate-size", "10M", "--retain", "7"};
+    auto argv = makeArgv(args);
+
+    expect(parseArgs(static_cast<int>(argv.size()), argv.data(), cfg), "parseArgs should accept rotation policy");
+    expect(cfg.rotateBytes == 10ull * 1024ull * 1024ull, "expected rotate size to be parsed");
+    expect(cfg.retainCount == 7, "expected retain count to be parsed");
+}
+
 void testParseArgsAcceptsLoopFlag() {
     Config cfg;
     std::vector<std::string> args = {"infer_iot_raw", "-i", "eth0", "--loop"};
@@ -145,6 +164,26 @@ void testParseArgsRejectsInvalidPacketCount() {
     expect(!parseArgs(static_cast<int>(argv.size()), argv.data(), cfg), "parseArgs should reject zero packet count");
 }
 
+void testParseArgsRejectsInvalidRotateSize() {
+    Config cfg;
+    std::vector<std::string> args = {"infer_iot_raw", "-i", "eth0", "--rotate-size", "12XB"};
+    auto argv = makeArgv(args);
+    StreamCapture stdoutCapture(std::cout);
+    StreamCapture stderrCapture(std::cerr);
+
+    expect(!parseArgs(static_cast<int>(argv.size()), argv.data(), cfg), "parseArgs should reject invalid rotate size");
+}
+
+void testParseArgsRejectsInvalidRetainCount() {
+    Config cfg;
+    std::vector<std::string> args = {"infer_iot_raw", "-i", "eth0", "--retain", "-1"};
+    auto argv = makeArgv(args);
+    StreamCapture stdoutCapture(std::cout);
+    StreamCapture stderrCapture(std::cerr);
+
+    expect(!parseArgs(static_cast<int>(argv.size()), argv.data(), cfg), "parseArgs should reject negative retain count");
+}
+
 void testSuggestLocalTestAddressUsesDeviceOrGatewaySubnet() {
     const auto fromDevice = suggestLocalTestAddress(std::optional<std::string>("10.0.5.23"), std::nullopt);
     expect(fromDevice && *fromDevice == "10.0.5.10/24", "expected /24 suggestion from device IP");
@@ -157,6 +196,15 @@ void testNormalizeOuiPrefixAcceptsMacFormats() {
     expect(normalizeOuiPrefix("b8:a4:4f:01:02:03") == "B8A44F", "expected colon-delimited MAC to normalize");
     expect(normalizeOuiPrefix("B8-A4-4F") == "B8A44F", "expected hyphenated OUI to normalize");
     expect(normalizeOuiPrefix("invalid") == "", "expected invalid OUI input to be rejected");
+}
+
+void testParseByteSizeAcceptsSuffixes() {
+    std::uintmax_t value = 0;
+
+    expect(parseByteSize("512", value) && value == 512, "expected plain byte size to parse");
+    expect(parseByteSize("64K", value) && value == 64ull * 1024ull, "expected kilobyte suffix to parse");
+    expect(parseByteSize("10mb", value) && value == 10ull * 1024ull * 1024ull, "expected case-insensitive suffix");
+    expect(!parseByteSize("bad", value), "expected invalid size token to fail");
 }
 
 void testParseOuiLineExtractsVendorEntry() {
@@ -193,6 +241,69 @@ void testWriteToStreamsMirrorsMessage() {
 
     expect(primary.str() == "hello\n", "expected primary stream to receive message");
     expect(secondary.str() == "hello\n", "expected secondary stream to receive message");
+}
+
+void testRotateLogFilesShiftsArchives() {
+    const std::filesystem::path base = "/tmp/device_discovery_rotate_files.log";
+    const auto archive1 = rotatedLogPath(base, 1);
+    const auto archive2 = rotatedLogPath(base, 2);
+    const auto archive3 = rotatedLogPath(base, 3);
+    std::filesystem::remove(base);
+    std::filesystem::remove(archive1);
+    std::filesystem::remove(archive2);
+    std::filesystem::remove(archive3);
+
+    {
+        std::ofstream(base) << "current";
+        std::ofstream(archive1) << "old-1";
+        std::ofstream(archive2) << "old-2";
+    }
+
+    std::string errorMessage;
+    expect(rotateLogFiles(base, 3, &errorMessage), "expected rotateLogFiles to succeed");
+    expect(readTextFile(archive1) == "current", "expected current log to become .1");
+    expect(readTextFile(archive2) == "old-1", "expected .1 archive to become .2");
+    expect(readTextFile(archive3) == "old-2", "expected .2 archive to become .3");
+    expect(!std::filesystem::exists(base), "expected current log path to be rotated away before reopening");
+
+    std::filesystem::remove(base);
+    std::filesystem::remove(archive1);
+    std::filesystem::remove(archive2);
+    std::filesystem::remove(archive3);
+}
+
+void testRotatingLogRotatesBeforeExceedingLimit() {
+    const std::filesystem::path base = "/tmp/device_discovery_rotating_log.log";
+    const auto archive1 = rotatedLogPath(base, 1);
+    const auto archive2 = rotatedLogPath(base, 2);
+    std::filesystem::remove(base);
+    std::filesystem::remove(archive1);
+    std::filesystem::remove(archive2);
+
+    Config cfg;
+    cfg.outputPath = base.string();
+    cfg.rotateBytes = 10;
+    cfg.retainCount = 2;
+
+    {
+        std::ofstream(base) << "12345678";
+    }
+
+    RotatingLog log(cfg, nullptr);
+    log.write("abc");
+    log.flush();
+    expect(readTextFile(archive1) == "12345678", "expected existing file to rotate to .1");
+    expect(readTextFile(base) == "abc", "expected current log to contain the new message");
+
+    log.write("0123456789");
+    log.flush();
+    expect(readTextFile(archive2) == "12345678", "expected oldest rotated file to shift to .2");
+    expect(readTextFile(archive1) == "abc", "expected previous current log to become .1");
+    expect(readTextFile(base) == "0123456789", "expected new current log file to contain the latest write");
+
+    std::filesystem::remove(base);
+    std::filesystem::remove(archive1);
+    std::filesystem::remove(archive2);
 }
 
 void testFormatRunTimestampLineUsesExpectedPrefix() {
@@ -315,13 +426,19 @@ int main() {
     } tests[] = {
         {"parseArgs accepts flags and positional interface", testParseArgsAcceptsFlagsAndPositionalInterface},
         {"parseArgs accepts custom output path", testParseArgsAcceptsCustomOutputPath},
+        {"parseArgs accepts rotation policy", testParseArgsAcceptsRotationPolicy},
         {"parseArgs accepts loop flag", testParseArgsAcceptsLoopFlag},
         {"parseArgs rejects invalid packet count", testParseArgsRejectsInvalidPacketCount},
+        {"parseArgs rejects invalid rotate size", testParseArgsRejectsInvalidRotateSize},
+        {"parseArgs rejects invalid retain count", testParseArgsRejectsInvalidRetainCount},
         {"suggestLocalTestAddress uses device or gateway subnet", testSuggestLocalTestAddressUsesDeviceOrGatewaySubnet},
         {"normalizeOuiPrefix accepts MAC formats", testNormalizeOuiPrefixAcceptsMacFormats},
+        {"parseByteSize accepts suffixes", testParseByteSizeAcceptsSuffixes},
         {"parseOuiLine extracts vendor entry", testParseOuiLineExtractsVendorEntry},
         {"lookupMacVendor uses local OUI file", testLookupMacVendorUsesLocalOuiFile},
         {"writeToStreams mirrors message", testWriteToStreamsMirrorsMessage},
+        {"rotateLogFiles shifts archives", testRotateLogFilesShiftsArchives},
+        {"RotatingLog rotates before exceeding limit", testRotatingLogRotatesBeforeExceedingLimit},
         {"formatRunTimestampLine uses expected prefix", testFormatRunTimestampLineUsesExpectedPrefix},
         {"formatLoopContinuationLine uses expected text", testFormatLoopContinuationLineUsesExpectedText},
         {"formatInferenceReport includes summary", testFormatInferenceReportIncludesSummary},
