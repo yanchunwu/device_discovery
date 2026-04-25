@@ -10,8 +10,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_BINARY="${REPO_ROOT}/bin/infer_iot_raw"
 BINARY="${BINARY:-$(command -v infer_iot_raw 2>/dev/null || true)}"
 INTERFACE="${1:-enx000ec6bc22b0}"
-PACKETS="${PACKETS:-1000000}"
-TIMEOUT="${TIMEOUT:-3600}"
+PACKETS="${PACKETS:-100}"
+TIMEOUT="${TIMEOUT:-10}"
 
 if [[ -z "$BINARY" && -x "$REPO_BINARY" ]]; then
   BINARY="$REPO_BINARY"
