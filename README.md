@@ -60,10 +60,31 @@ Run the unit tests:
 make test
 ```
 
-To grant the binary raw-socket capability without running as root:
+Install the binary to the default prefix:
 
 ```bash
-make install-cap
+sudo make install
+```
+
+The default install path is `/usr/local/bin/infer_iot_raw`.
+
+To choose a different install prefix:
+
+```bash
+make install PREFIX=$HOME/.local
+sudo make install PREFIX=/usr
+```
+
+To stage an install into a packaging or rootfs directory:
+
+```bash
+make install DESTDIR=/tmp/pkgroot PREFIX=/usr
+```
+
+To grant the built binary raw-socket capability so it can later run without full root privileges:
+
+```bash
+sudo make install-cap
 ```
 
 ## Usage
@@ -166,8 +187,10 @@ To load it automatically in future Bash sessions, add this line to your `~/.bash
 Or install it system-wide:
 
 ```bash
-make install-bash-completion
+sudo make install-bash-completion
 ```
+
+You can also override the install location or stage the completion file with the same `PREFIX` and `DESTDIR` variables used by `make install`.
 
 The completion script supports:
 
