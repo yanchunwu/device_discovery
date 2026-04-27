@@ -154,6 +154,16 @@ void testParseArgsAcceptsLoopFlag() {
     expect(cfg.loopForever, "expected loop mode to be enabled");
 }
 
+void testParseArgsAcceptsQuietFlag() {
+    Config cfg;
+    std::vector<std::string> args = {"infer_iot_raw", "-i", "eth0", "--quiet"};
+    auto argv = makeArgv(args);
+
+    expect(parseArgs(static_cast<int>(argv.size()), argv.data(), cfg), "parseArgs should accept quiet flag");
+    expect(cfg.ifname == "eth0", "expected interface flag to be parsed");
+    expect(cfg.quiet, "expected quiet mode to be enabled");
+}
+
 void testParseArgsRejectsInvalidPacketCount() {
     Config cfg;
     std::vector<std::string> args = {"infer_iot_raw", "-i", "eth0", "-n", "0"};
@@ -387,6 +397,111 @@ void testWaitForInterfaceTimesOutCleanly() {
     expect(sleepCallCount == 3, "expected no sleep after the final failed poll");
 }
 
+void testTransientInterfaceErrorsAreRecoverable() {
+    expect(isTransientInterfaceError(ENODEV), "ENODEV should trigger interface recovery");
+    expect(isTransientInterfaceError(ENETDOWN), "ENETDOWN should trigger interface recovery");
+    expect(isTransientInterfaceError(ENETRESET), "ENETRESET should trigger interface recovery");
+    expect(isTransientInterfaceError(ENXIO), "ENXIO should trigger interface recovery");
+    expect(!isTransientInterfaceError(EACCES), "permission errors should stay fatal");
+}
+
+void testInterfaceNeedsRebindDetectsMissingOrReplacedInterface() {
+    expect(
+        !interfaceNeedsRebind(
+            "eth0",
+            17,
+            [](const char*) {
+                return 17u;
+            }),
+        "same interface index should not need rebind");
+
+    expect(
+        interfaceNeedsRebind(
+            "eth0",
+            17,
+            [](const char*) {
+                return 0u;
+            }),
+        "missing interface should need rebind");
+
+    expect(
+        interfaceNeedsRebind(
+            "eth0",
+            17,
+            [](const char*) {
+                return 18u;
+            }),
+        "changed interface index should need rebind");
+}
+
+void testShouldIgnoreCapturedFrameFiltersOwnAndOutgoingTraffic() {
+    const uint8_t ownMac[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
+    const uint8_t deviceMac[6] = {0xb8, 0xa4, 0x4f, 0x01, 0x02, 0x03};
+    const auto ownFrame = buildArpRequest(ownMac, "192.168.10.10", "192.168.10.1");
+    const auto deviceFrame = buildArpRequest(deviceMac, "192.168.10.44", "192.168.10.1");
+
+    expect(
+        shouldIgnoreCapturedFrame(
+            ownFrame.data(),
+            static_cast<ssize_t>(ownFrame.size()),
+            "02:11:22:33:44:55",
+            {},
+            PACKET_BROADCAST),
+        "frames from the capture NIC MAC should be ignored");
+
+    expect(
+        shouldIgnoreCapturedFrame(
+            deviceFrame.data(),
+            static_cast<ssize_t>(deviceFrame.size()),
+            "02:11:22:33:44:55",
+            {},
+            PACKET_OUTGOING),
+        "Linux packet-socket outgoing frames should be ignored");
+
+    expect(
+        !shouldIgnoreCapturedFrame(
+            deviceFrame.data(),
+            static_cast<ssize_t>(deviceFrame.size()),
+            "02:11:22:33:44:55",
+            {},
+            PACKET_BROADCAST),
+        "inbound frames from a different MAC should be captured");
+}
+
+void testShouldIgnoreCapturedFrameFiltersOwnIpv4Traffic() {
+    const uint8_t otherMac[6] = {0x0e, 0x9e, 0x5d, 0x2d, 0xf6, 0xf5};
+    const auto arpFrame = buildArpRequest(otherMac, "169.254.207.168", "169.254.207.1");
+    const auto ipv4Frame = buildUdpIpv4Frame(otherMac, "169.254.207.168", "239.255.255.250", 1900);
+    const std::set<std::string> ownIpv4Addresses = {"169.254.207.168"};
+
+    expect(
+        shouldIgnoreCapturedFrame(
+            arpFrame.data(),
+            static_cast<ssize_t>(arpFrame.size()),
+            "02:11:22:33:44:55",
+            ownIpv4Addresses,
+            PACKET_BROADCAST),
+        "ARP frames with the interface's own sender IP should be ignored");
+
+    expect(
+        shouldIgnoreCapturedFrame(
+            ipv4Frame.data(),
+            static_cast<ssize_t>(ipv4Frame.size()),
+            "02:11:22:33:44:55",
+            ownIpv4Addresses,
+            PACKET_MULTICAST),
+        "IPv4 frames with the interface's own source IP should be ignored");
+
+    expect(
+        !shouldIgnoreCapturedFrame(
+            arpFrame.data(),
+            static_cast<ssize_t>(arpFrame.size()),
+            "02:11:22:33:44:55",
+            {"169.254.207.169"},
+            PACKET_BROADCAST),
+        "frames from another source IP should still be captured");
+}
+
 void testHandleArpTracksGatewayAndLinkLocalProbe() {
     const uint8_t srcMac[6] = {0xb8, 0xa4, 0x4f, 0x01, 0x02, 0x03};
     Observation obs;
@@ -428,6 +543,7 @@ int main() {
         {"parseArgs accepts custom output path", testParseArgsAcceptsCustomOutputPath},
         {"parseArgs accepts rotation policy", testParseArgsAcceptsRotationPolicy},
         {"parseArgs accepts loop flag", testParseArgsAcceptsLoopFlag},
+        {"parseArgs accepts quiet flag", testParseArgsAcceptsQuietFlag},
         {"parseArgs rejects invalid packet count", testParseArgsRejectsInvalidPacketCount},
         {"parseArgs rejects invalid rotate size", testParseArgsRejectsInvalidRotateSize},
         {"parseArgs rejects invalid retain count", testParseArgsRejectsInvalidRetainCount},
@@ -445,6 +561,10 @@ int main() {
         {"interfacePollAttempts covers timeout window", testInterfacePollAttemptsCoversTimeoutWindow},
         {"waitForInterface returns when interface appears", testWaitForInterfaceReturnsWhenInterfaceAppears},
         {"waitForInterface times out cleanly", testWaitForInterfaceTimesOutCleanly},
+        {"transient interface errors are recoverable", testTransientInterfaceErrorsAreRecoverable},
+        {"interfaceNeedsRebind detects missing or replaced interface", testInterfaceNeedsRebindDetectsMissingOrReplacedInterface},
+        {"shouldIgnoreCapturedFrame filters own and outgoing traffic", testShouldIgnoreCapturedFrameFiltersOwnAndOutgoingTraffic},
+        {"shouldIgnoreCapturedFrame filters own IPv4 traffic", testShouldIgnoreCapturedFrameFiltersOwnIpv4Traffic},
         {"handleArp tracks gateway and link-local probe", testHandleArpTracksGatewayAndLinkLocalProbe},
         {"handleIpv4 tracks source and detects SSDP", testHandleIpv4TracksSourceAndDetectsSsdp},
     };

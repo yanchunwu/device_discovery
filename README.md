@@ -17,6 +17,8 @@ This tool is most useful when you need to answer questions like:
 ## Features
 
 - Captures raw Ethernet frames on a selected interface
+- Ignores host-originated packet-socket traffic from the capture NIC
+- Ignores IPv4 traffic sourced from addresses assigned to the capture NIC
 - Infers a likely IOT device MAC address
 - Looks up the likely device vendor from the MAC OUI when a local IEEE OUI database is available
 - Infers a likely IOT device IP address
@@ -26,6 +28,8 @@ This tool is most useful when you need to answer questions like:
 - Appends normal run output to `infer_iot_raw.log` in the current directory by default
 - Supports built-in size-based log rotation with configurable archive retention
 - Can repeat capture sessions indefinitely with `--loop`
+- Recovers when a USB Ethernet interface briefly disappears and comes back
+- Can suppress normal console output while preserving log output
 - Supports Bash autocompletion for flags and interface names
 
 ## Requirements
@@ -128,7 +132,15 @@ Or keep running capture sessions forever:
 sudo ./bin/infer_iot_raw -i eth1 --loop
 ```
 
+Or keep console output quiet while still writing the log:
+
+```bash
+sudo ./bin/infer_iot_raw -i eth1 --loop --quiet
+```
+
 If the named interface is not present yet, the program waits for it to appear for up to the configured timeout, then starts capture once the interface exists.
+
+If the interface briefly disappears while capture is running, for example during a USB Ethernet adapter reset, the program waits for it to return, reopens the raw socket, and continues the same capture session. Time spent waiting for reconnection is not counted against the active capture timeout.
 
 If the system has an IEEE OUI database installed, the output also includes a likely vendor name for the inferred device MAC.
 
@@ -137,6 +149,8 @@ By default, normal run output is also appended to `./infer_iot_raw.log`. Use `-o
 Use `--rotate-size` to enable built-in size-based rotation. When the current log would exceed that size, the tool renames the existing file to `.1`, shifts older archives to `.2`, `.3`, and so on, and keeps the number of rotated files specified by `--retain`.
 
 Use `-l` or `--loop` to restart capture automatically after each inference report instead of exiting.
+
+Use `-q` or `--quiet` to suppress normal console output. The selected log file still receives the same run output, and errors continue to be written to stderr.
 
 Supported options:
 
@@ -147,6 +161,7 @@ Supported options:
 - `--rotate-size <size>`: rotate the log before it grows beyond this size, for example `10M`; default `0` disables rotation
 - `--retain <count>`: number of rotated log files to keep when rotation is enabled; default `5`
 - `-l`, `--loop`: repeat capture sessions forever
+- `-q`, `--quiet`: suppress normal console output while preserving log output
 - `-h`, `--help`: show help output
 
 Example output:
@@ -207,7 +222,7 @@ You can also override the install location or stage the completion file with the
 
 The completion script supports:
 
-- option completion for `-h`, `--help`, `-i`, `--interface`, `-n`, `--packets`, `-t`, `--timeout`, `-o`, `--output`, `--rotate-size`, `--retain`, `-l`, `--loop`
+- option completion for `-h`, `--help`, `-i`, `--interface`, `-n`, `--packets`, `-t`, `--timeout`, `-o`, `--output`, `--rotate-size`, `--retain`, `-l`, `--loop`, `-q`, `--quiet`
 - interface-name completion from `/sys/class/net`
 - command completion for `infer_iot_raw`, `./infer_iot_raw`, `bin/infer_iot_raw`, and `./bin/infer_iot_raw`
 
@@ -241,7 +256,7 @@ The script writes:
 - `/etc/systemd/system/infer_iot_raw@.service` as a template unit
 - `/var/lib/infer_iot_raw/infer_iot_raw-<interface>.log` as the runtime log path
 
-The generated service enables built-in log rotation by default with `ROTATE_SIZE=10M` and `RETAIN_COUNT=7`.
+The generated service enables built-in log rotation by default with `ROTATE_SIZE=10M` and `RETAIN_COUNT=7`, and runs with `--quiet` so normal capture output goes to the selected log file without duplicating every report into the journal.
 
 You can override the packet, timeout, and retention defaults when invoking the script:
 

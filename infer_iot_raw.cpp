@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <errno.h>
+#include <ifaddrs.h>
 #include <linux/if_packet.h>
 #include <net/ethernet.h>
 #include <net/if.h>
@@ -47,6 +48,7 @@ struct Config {
     std::uintmax_t rotateBytes = 0;
     int retainCount = 5;
     bool loopForever = false;
+    bool quiet = false;
 };
 
 static void printHelp(const char* prog) {
@@ -65,17 +67,21 @@ static void printHelp(const char* prog) {
         << "      --rotate-size <size> Rotate the log when it would exceed this size; 0 disables rotation\n"
         << "      --retain <count>     Number of rotated log files to keep (default: 5)\n"
         << "  -l, --loop               Repeat capture sessions forever\n"
+        << "  -q, --quiet              Suppress normal console output; log output is unchanged\n"
         << "  -h, --help               Show this help message\n\n"
         << "Examples:\n"
         << "  sudo " << prog << " eth1\n"
         << "  sudo " << prog << " -i eth1 -n 100 -t 15\n"
         << "  sudo " << prog << " -i eth1 -o capture.log\n"
         << "  sudo " << prog << " -i eth1 -o capture.log --rotate-size 10M --retain 7\n"
-        << "  sudo " << prog << " -i eth1 --loop\n\n"
+        << "  sudo " << prog << " -i eth1 --loop\n"
+        << "  sudo " << prog << " -i eth1 --loop --quiet\n\n"
         << "Notes:\n"
         << "  - Requires Linux.\n"
         << "  - Requires root or CAP_NET_RAW.\n"
         << "  - Best results come from starting capture, then power-cycling the IoT device.\n"
+        << "  - Host-originated outgoing frames and the capture NIC's own IPv4 traffic are ignored.\n"
+        << "  - If a USB Ethernet interface briefly disappears, capture waits and rebinds.\n"
         << "  - Appends normal run output to the selected log file.\n"
         << "  - Rotation uses suffixes like .1, .2, and supports K, M, G, or T size suffixes.\n"
         << "  - Loop mode reruns capture sessions until interrupted.\n";
@@ -215,6 +221,8 @@ static bool parseArgs(int argc, char* argv[], Config& cfg) {
             }
         } else if (arg == "-l" || arg == "--loop") {
             cfg.loopForever = true;
+        } else if (arg == "-q" || arg == "--quiet") {
+            cfg.quiet = true;
         } else if (!arg.empty() && arg[0] == '-') {
             std::cerr << "Unknown option: " << arg << "\n\n";
             printHelp(argv[0]);
@@ -273,6 +281,26 @@ static std::string ipToString(uint32_t ip_be) {
         return "unknown";
     }
     return std::string(buf);
+}
+
+static std::set<std::string> getInterfaceIpv4Addresses(const std::string& ifname) {
+    std::set<std::string> addresses;
+    struct ifaddrs* ifaddr = nullptr;
+    if (getifaddrs(&ifaddr) != 0) {
+        return addresses;
+    }
+
+    for (const struct ifaddrs* entry = ifaddr; entry != nullptr; entry = entry->ifa_next) {
+        if (!entry->ifa_addr || ifname != entry->ifa_name || entry->ifa_addr->sa_family != AF_INET) {
+            continue;
+        }
+
+        const auto* addr = reinterpret_cast<const struct sockaddr_in*>(entry->ifa_addr);
+        addresses.insert(ipToString(addr->sin_addr.s_addr));
+    }
+
+    freeifaddrs(ifaddr);
+    return addresses;
 }
 
 static std::optional<uint32_t> parseIpv4String(const std::string& ip) {
@@ -660,6 +688,10 @@ static void writeToOutputs(
     }
 }
 
+static std::ostream* consoleOutput(const Config& cfg) {
+    return cfg.quiet ? nullptr : &std::cout;
+}
+
 static std::string currentLocalTimestamp() {
     const std::time_t now = std::time(nullptr);
     std::tm tm {};
@@ -763,6 +795,210 @@ static std::optional<int> waitForInterface(
     return std::nullopt;
 }
 
+static bool isTransientInterfaceError(int err) {
+    return err == ENODEV || err == ENETDOWN || err == ENETRESET || err == ENXIO;
+}
+
+template <typename Resolver>
+static bool interfaceNeedsRebind(
+    const std::string& ifname,
+    int boundIfindex,
+    Resolver&& resolver) {
+    const unsigned int currentIfindex = resolver(ifname.c_str());
+    return currentIfindex == 0 || static_cast<int>(currentIfindex) != boundIfindex;
+}
+
+static bool interfaceNeedsRebind(const std::string& ifname, int boundIfindex) {
+    return interfaceNeedsRebind(
+        ifname,
+        boundIfindex,
+        [](const char* name) { return if_nametoindex(name); });
+}
+
+struct CaptureSocket {
+    int fd = -1;
+    int ifindex = 0;
+    std::string ownMac;
+    std::set<std::string> ownIpv4Addresses;
+
+    CaptureSocket() = default;
+    CaptureSocket(const CaptureSocket&) = delete;
+    CaptureSocket& operator=(const CaptureSocket&) = delete;
+
+    CaptureSocket(CaptureSocket&& other) noexcept {
+        *this = std::move(other);
+    }
+
+    CaptureSocket& operator=(CaptureSocket&& other) noexcept {
+        if (this != &other) {
+            reset();
+            fd = other.fd;
+            ifindex = other.ifindex;
+            ownMac = std::move(other.ownMac);
+            ownIpv4Addresses = std::move(other.ownIpv4Addresses);
+            other.fd = -1;
+            other.ifindex = 0;
+        }
+        return *this;
+    }
+
+    ~CaptureSocket() {
+        reset();
+    }
+
+    void reset() {
+        if (fd >= 0) {
+            close(fd);
+            fd = -1;
+        }
+        ifindex = 0;
+        ownMac.clear();
+        ownIpv4Addresses.clear();
+    }
+};
+
+static std::optional<CaptureSocket> openCaptureSocket(
+    const Config& cfg,
+    int attempts,
+    RotatingLog* logStream,
+    bool reconnecting = false) {
+    bool announcedWait = false;
+    bool announcedUnstable = false;
+
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        const unsigned int ifindex = if_nametoindex(cfg.ifname.c_str());
+        if (ifindex == 0) {
+            if (!announcedWait) {
+                const std::string message = reconnecting
+                    ? "Interface " + cfg.ifname + " disappeared; waiting for it to return...\n"
+                    : "Waiting for interface " + cfg.ifname + " to appear...\n";
+                writeToOutputs(message, consoleOutput(cfg), logStream);
+                announcedWait = true;
+            }
+            if (attempt + 1 < attempts) {
+                std::this_thread::sleep_for(kInterfacePollInterval);
+            }
+            continue;
+        }
+
+        int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+        if (fd < 0) {
+            std::cerr << "socket() failed: " << std::strerror(errno) << "\n";
+            return std::nullopt;
+        }
+
+        const auto ownMac = getInterfaceMac(fd, cfg.ifname);
+        if (!ownMac) {
+            close(fd);
+            if (!announcedUnstable) {
+                writeToOutputs(
+                    "Interface " + cfg.ifname + " is not ready yet; waiting to retry...\n",
+                    consoleOutput(cfg),
+                    logStream);
+                announcedUnstable = true;
+            }
+            if (attempt + 1 < attempts) {
+                std::this_thread::sleep_for(kInterfacePollInterval);
+            }
+            continue;
+        }
+
+        struct sockaddr_ll sll{};
+        sll.sll_family = AF_PACKET;
+        sll.sll_protocol = htons(ETH_P_ALL);
+        sll.sll_ifindex = static_cast<int>(ifindex);
+
+        if (bind(fd, reinterpret_cast<struct sockaddr*>(&sll), sizeof(sll)) < 0) {
+            const int savedErrno = errno;
+            close(fd);
+            if (isTransientInterfaceError(savedErrno) || if_nametoindex(cfg.ifname.c_str()) == 0) {
+                if (!announcedUnstable) {
+                    writeToOutputs(
+                        "Interface " + cfg.ifname + " changed while opening; waiting to retry...\n",
+                        consoleOutput(cfg),
+                        logStream);
+                    announcedUnstable = true;
+                }
+                if (attempt + 1 < attempts) {
+                    std::this_thread::sleep_for(kInterfacePollInterval);
+                }
+                continue;
+            }
+
+            std::cerr << "bind() failed: " << std::strerror(savedErrno) << "\n";
+            return std::nullopt;
+        }
+
+        CaptureSocket captureSocket;
+        captureSocket.fd = fd;
+        captureSocket.ifindex = static_cast<int>(ifindex);
+        captureSocket.ownMac = *ownMac;
+        captureSocket.ownIpv4Addresses = getInterfaceIpv4Addresses(cfg.ifname);
+        return captureSocket;
+    }
+
+    std::cerr << "Interface did not appear within timeout: " << cfg.ifname << "\n";
+    return std::nullopt;
+}
+
+static void writeReconnectComplete(const Config& cfg, const CaptureSocket& captureSocket, RotatingLog* logStream) {
+    std::ostringstream status;
+    status << "Reconnected to " << cfg.ifname
+           << " with interface index " << captureSocket.ifindex << ".\n";
+    writeToOutputs(status.str(), consoleOutput(cfg), logStream);
+}
+
+static bool shouldIgnoreCapturedFrame(
+    const uint8_t* frame,
+    ssize_t len,
+    const std::string& ownMac,
+    const std::set<std::string>& ownIpv4Addresses,
+    unsigned char packetType) {
+    if (packetType == PACKET_OUTGOING) {
+        return true;
+    }
+
+    if (len < static_cast<ssize_t>(sizeof(struct ether_header))) {
+        return false;
+    }
+
+    const auto* eth = reinterpret_cast<const struct ether_header*>(frame);
+    if (macToString(eth->ether_shost) == ownMac) {
+        return true;
+    }
+
+    if (ownIpv4Addresses.empty()) {
+        return false;
+    }
+
+    const uint16_t etherType = ntohs(eth->ether_type);
+    if (etherType == ETHERTYPE_ARP) {
+        if (len < static_cast<ssize_t>(sizeof(struct ether_header) + sizeof(struct ether_arp))) {
+            return false;
+        }
+
+        const auto* arp = reinterpret_cast<const struct ether_arp*>(frame + sizeof(struct ether_header));
+        uint32_t spa_be = 0;
+        std::memcpy(&spa_be, arp->arp_spa, sizeof(spa_be));
+        return ownIpv4Addresses.count(ipToString(spa_be)) > 0;
+    }
+
+    if (etherType == ETHERTYPE_IP) {
+        if (len < static_cast<ssize_t>(sizeof(struct ether_header) + sizeof(struct iphdr))) {
+            return false;
+        }
+
+        const auto* ip = reinterpret_cast<const struct iphdr*>(frame + sizeof(struct ether_header));
+        if (ip->version != 4) {
+            return false;
+        }
+
+        return ownIpv4Addresses.count(ipToString(ip->saddr)) > 0;
+    }
+
+    return false;
+}
+
 static void handleArp(const uint8_t* frame, ssize_t len, Observation& obs) {
     if (len < static_cast<ssize_t>(sizeof(struct ether_header) + sizeof(struct ether_arp))) {
         return;
@@ -840,95 +1076,109 @@ static void handleIpv4(const uint8_t* frame, ssize_t len, Observation& obs) {
 }
 
 static int runCaptureSession(const Config& cfg, RotatingLog* logStream) {
-    writeToOutputs(formatRunTimestampLine(currentLocalTimestamp()), &std::cout, logStream);
+    writeToOutputs(formatRunTimestampLine(currentLocalTimestamp()), consoleOutput(cfg), logStream);
 
-    int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
-    if (fd < 0) {
-        std::cerr << "socket() failed: " << std::strerror(errno) << "\n";
-        return 1;
-    }
-
-    const auto ifindex = waitForInterface(
-        cfg.ifname,
+    auto captureSocketOpt = openCaptureSocket(
+        cfg,
         interfacePollAttempts(cfg.timeoutSec),
-        [](const char* ifname) { return if_nametoindex(ifname); },
-        []() { std::this_thread::sleep_for(kInterfacePollInterval); },
-        &std::cout,
         logStream);
-    if (!ifindex) {
-        std::cerr << "Interface did not appear within timeout: " << cfg.ifname << "\n";
-        close(fd);
+    if (!captureSocketOpt) {
         return 1;
     }
-
-    const auto ownMac = getInterfaceMac(fd, cfg.ifname);
-    if (!ownMac) {
-        std::cerr << "Failed to read MAC address for interface: " << cfg.ifname << "\n";
-        close(fd);
-        return 1;
-    }
-
-    struct sockaddr_ll sll{};
-    sll.sll_family = AF_PACKET;
-    sll.sll_protocol = htons(ETH_P_ALL);
-    sll.sll_ifindex = *ifindex;
-
-    if (bind(fd, reinterpret_cast<struct sockaddr*>(&sll), sizeof(sll)) < 0) {
-        std::cerr << "bind() failed: " << std::strerror(errno) << "\n";
-        close(fd);
-        return 1;
-    }
+    CaptureSocket captureSocket = std::move(*captureSocketOpt);
 
     {
         std::ostringstream status;
         status << "Listening on " << cfg.ifname
                << " for up to " << cfg.maxPackets
                << " packets or " << cfg.timeoutSec << " seconds...\n";
-        writeToOutputs(status.str(), &std::cout, logStream);
+        writeToOutputs(status.str(), consoleOutput(cfg), logStream);
     }
 
     Observation obs;
     std::vector<uint8_t> buf(65536);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(cfg.timeoutSec);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(cfg.timeoutSec);
+
+    auto reconnect = [&]() -> bool {
+        const auto reconnectStarted = std::chrono::steady_clock::now();
+        auto reopened = openCaptureSocket(
+            cfg,
+            interfacePollAttempts(cfg.timeoutSec),
+            logStream,
+            true);
+        const auto reconnectFinished = std::chrono::steady_clock::now();
+        deadline += reconnectFinished - reconnectStarted;
+
+        if (!reopened) {
+            return false;
+        }
+
+        captureSocket = std::move(*reopened);
+        writeReconnectComplete(cfg, captureSocket, logStream);
+        return true;
+    };
 
     int captured = 0;
     while (captured < cfg.maxPackets) {
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) {
-            writeToOutputs("Timeout reached.\n", &std::cout, logStream);
+            writeToOutputs("Timeout reached.\n", consoleOutput(cfg), logStream);
             break;
         }
 
         const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
+        auto selectWait = remaining;
+        const auto maxSelectWait = std::chrono::duration_cast<std::chrono::microseconds>(
+            kInterfacePollInterval);
+        if (selectWait > maxSelectWait) {
+            selectWait = maxSelectWait;
+        }
+
         fd_set rfds;
         FD_ZERO(&rfds);
-        FD_SET(fd, &rfds);
+        FD_SET(captureSocket.fd, &rfds);
 
         struct timeval tv{};
-        tv.tv_sec = remaining.count() / 1000000;
-        tv.tv_usec = remaining.count() % 1000000;
+        tv.tv_sec = selectWait.count() / 1000000;
+        tv.tv_usec = selectWait.count() % 1000000;
 
-        int rc = select(fd + 1, &rfds, nullptr, nullptr, &tv);
+        int rc = select(captureSocket.fd + 1, &rfds, nullptr, nullptr, &tv);
         if (rc < 0) {
             if (errno == EINTR) {
                 continue;
             }
             std::cerr << "select() failed: " << std::strerror(errno) << "\n";
-            close(fd);
             return 1;
         }
         if (rc == 0) {
-            writeToOutputs("Timeout reached.\n", &std::cout, logStream);
-            break;
+            if (interfaceNeedsRebind(cfg.ifname, captureSocket.ifindex)) {
+                if (!reconnect()) {
+                    return 1;
+                }
+            }
+            continue;
         }
 
-        ssize_t n = recv(fd, buf.data(), buf.size(), 0);
+        struct sockaddr_ll packetAddress{};
+        socklen_t packetAddressLen = sizeof(packetAddress);
+        ssize_t n = recvfrom(
+            captureSocket.fd,
+            buf.data(),
+            buf.size(),
+            0,
+            reinterpret_cast<struct sockaddr*>(&packetAddress),
+            &packetAddressLen);
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
             }
+            if (isTransientInterfaceError(errno) || interfaceNeedsRebind(cfg.ifname, captureSocket.ifindex)) {
+                if (!reconnect()) {
+                    return 1;
+                }
+                continue;
+            }
             std::cerr << "recv() failed: " << std::strerror(errno) << "\n";
-            close(fd);
             return 1;
         }
 
@@ -936,13 +1186,18 @@ static int runCaptureSession(const Config& cfg, RotatingLog* logStream) {
             continue;
         }
 
-        const auto* eth = reinterpret_cast<const struct ether_header*>(buf.data());
-        if (macToString(eth->ether_shost) == *ownMac) {
+        if (shouldIgnoreCapturedFrame(
+                buf.data(),
+                n,
+                captureSocket.ownMac,
+                captureSocket.ownIpv4Addresses,
+                packetAddress.sll_pkttype)) {
             continue;
         }
 
         ++captured;
 
+        const auto* eth = reinterpret_cast<const struct ether_header*>(buf.data());
         const uint16_t etherType = ntohs(eth->ether_type);
 
         if (etherType == ETHERTYPE_ARP) {
@@ -952,9 +1207,7 @@ static int runCaptureSession(const Config& cfg, RotatingLog* logStream) {
         }
     }
 
-    close(fd);
-
-    writeToOutputs(formatInferenceReport(cfg, captured, obs), &std::cout, logStream);
+    writeToOutputs(formatInferenceReport(cfg, captured, obs), consoleOutput(cfg), logStream);
 
     return 0;
 }
@@ -979,7 +1232,7 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-        writeToOutputs(formatLoopContinuationLine(), &std::cout, logStream);
+        writeToOutputs(formatLoopContinuationLine(), consoleOutput(cfg), logStream);
         logFile.write("\n");
         logFile.flush();
         std::this_thread::sleep_for(kLoopRestartDelay);

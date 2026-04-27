@@ -59,7 +59,7 @@ User=inferiot
 Group=inferiot
 WorkingDirectory=/var/lib/infer_iot_raw
 EnvironmentFile=/etc/default/infer_iot_raw
-ExecStart=${BINARY} -l -i %I -n \${PACKETS} -t \${TIMEOUT} -o ${SERVICE_HOME}/infer_iot_raw-%I.log --rotate-size \${ROTATE_SIZE} --retain \${RETAIN_COUNT}
+ExecStart=${BINARY} -l --quiet -i %I -n \${PACKETS} -t \${TIMEOUT} -o ${SERVICE_HOME}/infer_iot_raw-%I.log --rotate-size \${ROTATE_SIZE} --retain \${RETAIN_COUNT}
 Restart=always
 RestartSec=2
 
