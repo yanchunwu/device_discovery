@@ -14,6 +14,7 @@
 
 #include <cstring>
 #include <cctype>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -40,6 +41,14 @@ struct Observation {
     bool sawSSDP = false;
 };
 
+struct CidrRange {
+    uint32_t network = 0;
+    uint32_t first = 0;
+    uint32_t last = 0;
+    int prefix = 0;
+    std::uint64_t addressCount = 0;
+};
+
 struct Config {
     std::string ifname;
     int maxPackets = 200;
@@ -47,9 +56,83 @@ struct Config {
     std::string outputPath = "infer_iot_raw.log";
     std::uintmax_t rotateBytes = 0;
     int retainCount = 5;
+    std::optional<CidrRange> probeCidr;
     bool loopForever = false;
     bool quiet = false;
 };
+
+static constexpr std::uint64_t kMaxArpProbeAddresses = 65536;
+
+static bool parseInt(const std::string& s, int& value);
+
+static std::optional<uint32_t> parseIpv4String(const std::string& ip) {
+    struct in_addr addr {};
+    if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) {
+        return std::nullopt;
+    }
+    return ntohl(addr.s_addr);
+}
+
+static std::string ipv4HostToString(uint32_t ip) {
+    char buf[INET_ADDRSTRLEN] = {0};
+    struct in_addr addr {};
+    addr.s_addr = htonl(ip);
+    if (!inet_ntop(AF_INET, &addr, buf, sizeof(buf))) {
+        return "unknown";
+    }
+    return std::string(buf);
+}
+
+static uint32_t prefixMask(int prefix) {
+    if (prefix <= 0) {
+        return 0;
+    }
+    if (prefix >= 32) {
+        return 0xFFFFFFFFu;
+    }
+    return 0xFFFFFFFFu << (32 - prefix);
+}
+
+static std::optional<CidrRange> parseCidr(const std::string& cidr) {
+    const auto slash = cidr.find('/');
+    if (slash == std::string::npos || slash == 0 || slash + 1 >= cidr.size()) {
+        return std::nullopt;
+    }
+
+    const auto ip = parseIpv4String(cidr.substr(0, slash));
+    if (!ip) {
+        return std::nullopt;
+    }
+
+    int prefix = 0;
+    if (!parseInt(cidr.substr(slash + 1), prefix) || prefix < 0 || prefix > 32) {
+        return std::nullopt;
+    }
+
+    const uint32_t mask = prefixMask(prefix);
+    const uint32_t network = *ip & mask;
+    const uint32_t broadcast = network | ~mask;
+
+    CidrRange range;
+    range.network = network;
+    range.prefix = prefix;
+
+    if (prefix <= 30) {
+        range.first = network + 1;
+        range.last = broadcast - 1;
+    } else {
+        range.first = network;
+        range.last = broadcast;
+    }
+
+    range.addressCount =
+        static_cast<std::uint64_t>(range.last) - static_cast<std::uint64_t>(range.first) + 1;
+    return range;
+}
+
+static std::string formatCidrRange(const CidrRange& range) {
+    return ipv4HostToString(range.network) + "/" + std::to_string(range.prefix);
+}
 
 static void printHelp(const char* prog) {
     std::cout
@@ -64,6 +147,7 @@ static void printHelp(const char* prog) {
         << "  -n, --packets <count>    Maximum number of packets to capture (default: 200)\n"
         << "  -t, --timeout <sec>      Stop after timeout in seconds (default: 30)\n"
         << "  -o, --output <path>      Log file path (default: infer_iot_raw.log)\n"
+        << "      --probe-cidr <cidr>  Actively ARP-probe a CIDR before passive capture\n"
         << "      --rotate-size <size> Rotate the log when it would exceed this size; 0 disables rotation\n"
         << "      --retain <count>     Number of rotated log files to keep (default: 5)\n"
         << "  -l, --loop               Repeat capture sessions forever\n"
@@ -72,6 +156,7 @@ static void printHelp(const char* prog) {
         << "Examples:\n"
         << "  sudo " << prog << " eth1\n"
         << "  sudo " << prog << " -i eth1 -n 100 -t 15\n"
+        << "  sudo " << prog << " -i eth1 --probe-cidr 192.168.11.0/24\n"
         << "  sudo " << prog << " -i eth1 -o capture.log\n"
         << "  sudo " << prog << " -i eth1 -o capture.log --rotate-size 10M --retain 7\n"
         << "  sudo " << prog << " -i eth1 --loop\n"
@@ -80,6 +165,8 @@ static void printHelp(const char* prog) {
         << "  - Requires Linux.\n"
         << "  - Requires root or CAP_NET_RAW.\n"
         << "  - Best results come from starting capture, then power-cycling the IoT device.\n"
+        << "  - Use --probe-cidr to find quiet fixed-IP devices that answer ARP.\n"
+        << "  - ARP probing is limited to " << kMaxArpProbeAddresses << " candidate addresses per run.\n"
         << "  - Host-originated outgoing frames and the capture NIC's own IPv4 traffic are ignored.\n"
         << "  - If a USB Ethernet interface briefly disappears, capture waits and rebinds.\n"
         << "  - Appends normal run output to the selected log file.\n"
@@ -197,6 +284,26 @@ static bool parseArgs(int argc, char* argv[], Config& cfg) {
                 printHelp(argv[0]);
                 return false;
             }
+        } else if (arg == "--probe-cidr") {
+            if (i + 1 >= argc) {
+                std::cerr << "Missing value for " << arg << "\n\n";
+                printHelp(argv[0]);
+                return false;
+            }
+            const std::string cidr = argv[++i];
+            const auto parsed = parseCidr(cidr);
+            if (!parsed) {
+                std::cerr << "Invalid probe CIDR\n\n";
+                printHelp(argv[0]);
+                return false;
+            }
+            if (parsed->addressCount > kMaxArpProbeAddresses) {
+                std::cerr << "Probe CIDR is too large; maximum is "
+                          << kMaxArpProbeAddresses << " candidate addresses\n\n";
+                printHelp(argv[0]);
+                return false;
+            }
+            cfg.probeCidr = parsed;
         } else if (arg == "--rotate-size") {
             if (i + 1 >= argc) {
                 std::cerr << "Missing value for " << arg << "\n\n";
@@ -258,6 +365,124 @@ static std::string macToString(const uint8_t* mac) {
     return oss.str();
 }
 
+using MacBytes = std::array<uint8_t, ETH_ALEN>;
+
+static std::optional<MacBytes> macStringToBytes(const std::string& mac) {
+    std::string hex;
+    hex.reserve(12);
+
+    for (const unsigned char ch : mac) {
+        if (std::isxdigit(ch)) {
+            hex.push_back(static_cast<char>(ch));
+        }
+    }
+
+    if (hex.size() != 12) {
+        return std::nullopt;
+    }
+
+    MacBytes bytes {};
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        try {
+            bytes[i] = static_cast<uint8_t>(std::stoul(hex.substr(i * 2, 2), nullptr, 16));
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    return bytes;
+}
+
+static bool ipInRange(uint32_t ip, const CidrRange& range) {
+    return ip >= range.first && ip <= range.last;
+}
+
+static uint32_t chooseArpProbeSenderIp(
+    const CidrRange& range,
+    uint32_t targetIp,
+    const std::set<std::string>& ownIpv4Addresses) {
+    for (const auto& ownIp : ownIpv4Addresses) {
+        const auto parsed = parseIpv4String(ownIp);
+        if (parsed && ipInRange(*parsed, range) && *parsed != targetIp) {
+            return *parsed;
+        }
+    }
+
+    if (range.addressCount > 1) {
+        if (range.first != targetIp) {
+            return range.first;
+        }
+        return range.last;
+    }
+
+    return targetIp == 0xFFFFFFFFu ? targetIp - 1 : targetIp + 1;
+}
+
+static std::vector<uint8_t> buildArpProbeFrame(
+    const MacBytes& srcMac,
+    uint32_t senderIp,
+    uint32_t targetIp) {
+    std::vector<uint8_t> frame(sizeof(struct ether_header) + sizeof(struct ether_arp));
+
+    auto* eth = reinterpret_cast<struct ether_header*>(frame.data());
+    std::memset(eth->ether_dhost, 0xff, ETH_ALEN);
+    std::memcpy(eth->ether_shost, srcMac.data(), ETH_ALEN);
+    eth->ether_type = htons(ETHERTYPE_ARP);
+
+    auto* arp = reinterpret_cast<struct ether_arp*>(frame.data() + sizeof(struct ether_header));
+    arp->ea_hdr.ar_hrd = htons(ARPHRD_ETHER);
+    arp->ea_hdr.ar_pro = htons(ETHERTYPE_IP);
+    arp->ea_hdr.ar_hln = ETH_ALEN;
+    arp->ea_hdr.ar_pln = 4;
+    arp->ea_hdr.ar_op = htons(ARPOP_REQUEST);
+    std::memcpy(arp->arp_sha, srcMac.data(), ETH_ALEN);
+    std::memset(arp->arp_tha, 0x00, ETH_ALEN);
+
+    const uint32_t senderIpBe = htonl(senderIp);
+    const uint32_t targetIpBe = htonl(targetIp);
+    std::memcpy(arp->arp_spa, &senderIpBe, sizeof(senderIpBe));
+    std::memcpy(arp->arp_tpa, &targetIpBe, sizeof(targetIpBe));
+
+    return frame;
+}
+
+struct ArpProbeHit {
+    uint32_t ip = 0;
+    std::string mac;
+};
+
+static std::optional<ArpProbeHit> parseArpProbeReply(
+    const uint8_t* frame,
+    ssize_t len,
+    const std::set<uint32_t>& targetIps) {
+    if (len < static_cast<ssize_t>(sizeof(struct ether_header) + sizeof(struct ether_arp))) {
+        return std::nullopt;
+    }
+
+    const auto* eth = reinterpret_cast<const struct ether_header*>(frame);
+    if (ntohs(eth->ether_type) != ETHERTYPE_ARP) {
+        return std::nullopt;
+    }
+
+    const auto* arp = reinterpret_cast<const struct ether_arp*>(frame + sizeof(struct ether_header));
+    if (ntohs(arp->ea_hdr.ar_hrd) != ARPHRD_ETHER ||
+        ntohs(arp->ea_hdr.ar_pro) != ETHERTYPE_IP ||
+        arp->ea_hdr.ar_hln != ETH_ALEN ||
+        arp->ea_hdr.ar_pln != 4 ||
+        ntohs(arp->ea_hdr.ar_op) != ARPOP_REPLY) {
+        return std::nullopt;
+    }
+
+    uint32_t senderIpBe = 0;
+    std::memcpy(&senderIpBe, arp->arp_spa, sizeof(senderIpBe));
+    const uint32_t senderIp = ntohl(senderIpBe);
+    if (targetIps.count(senderIp) == 0) {
+        return std::nullopt;
+    }
+
+    return ArpProbeHit{senderIp, macToString(arp->arp_sha)};
+}
+
 static std::optional<std::string> getInterfaceMac(int fd, const std::string& ifname) {
     if (ifname.size() >= IFNAMSIZ) {
         return std::nullopt;
@@ -301,14 +526,6 @@ static std::set<std::string> getInterfaceIpv4Addresses(const std::string& ifname
 
     freeifaddrs(ifaddr);
     return addresses;
-}
-
-static std::optional<uint32_t> parseIpv4String(const std::string& ip) {
-    struct in_addr addr {};
-    if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) {
-        return std::nullopt;
-    }
-    return ntohl(addr.s_addr);
 }
 
 static bool isUsableIpv4(const std::optional<std::string>& ip) {
@@ -712,6 +929,12 @@ static std::string formatLoopContinuationLine() {
     return "Loop mode enabled: starting the next capture session.\n";
 }
 
+struct ArpProbeResult {
+    CidrRange cidr;
+    int probesSent = 0;
+    std::map<uint32_t, std::string> replies;
+};
+
 static std::string formatInferenceReport(const Config& cfg, int captured, const Observation& obs) {
     const auto deviceMac = mostFrequent(obs.macCount);
     const auto deviceIp = mostFrequent(obs.srcIpCount);
@@ -752,6 +975,39 @@ static std::string formatInferenceReport(const Config& cfg, int captured, const 
         out << "================\n\n";
     }
 
+    return out.str();
+}
+
+static std::string formatArpProbeReport(const Config& cfg, const ArpProbeResult& result) {
+    std::ostringstream out;
+    out << "\nARP probe result\n";
+    out << "================\n";
+    out << "Probe CIDR: " << formatCidrRange(result.cidr) << "\n";
+    out << "ARP probes sent: " << result.probesSent << "\n";
+    out << "Responding hosts: " << result.replies.size() << "\n";
+
+    for (const auto& [ip, mac] : result.replies) {
+        out << "  " << ipv4HostToString(ip) << " -> " << mac << "\n";
+        const auto vendor = lookupMacVendor(mac);
+        if (vendor) {
+            out << "    vendor: " << *vendor << "\n";
+        }
+    }
+
+    if (result.replies.empty()) {
+        out << "No ARP replies received from this CIDR.\n";
+    } else {
+        const std::string firstIp = ipv4HostToString(result.replies.begin()->first);
+        const auto suggestedLocalIp = suggestLocalTestAddress(firstIp, std::nullopt);
+        if (suggestedLocalIp) {
+            out << "\nSuggested next test for " << firstIp << ":\n";
+            out << "  sudo ip addr add " << *suggestedLocalIp << " dev " << cfg.ifname << "\n";
+            out << "  sudo ip link set " << cfg.ifname << " up\n";
+            out << "  ping -I " << cfg.ifname << " " << firstIp << "\n";
+        }
+    }
+
+    out << "================\n\n";
     return out.str();
 }
 
@@ -1007,7 +1263,8 @@ static void handleArp(const uint8_t* frame, ssize_t len, Observation& obs) {
     const auto* eth = reinterpret_cast<const struct ether_header*>(frame);
     const auto* arp = reinterpret_cast<const struct ether_arp*>(frame + sizeof(struct ether_header));
 
-    if (ntohs(arp->ea_hdr.ar_op) != ARPOP_REQUEST) {
+    const uint16_t arpOp = ntohs(arp->ea_hdr.ar_op);
+    if (arpOp != ARPOP_REQUEST && arpOp != ARPOP_REPLY) {
         return;
     }
 
@@ -1024,6 +1281,10 @@ static void handleArp(const uint8_t* frame, ssize_t len, Observation& obs) {
 
     if (tellIp != "0.0.0.0") {
         obs.srcIpCount[tellIp]++;
+    }
+
+    if (arpOp == ARPOP_REPLY) {
+        return;
     }
 
     if (tellIp == "0.0.0.0" && isLinkLocal(whoHas)) {
@@ -1075,6 +1336,219 @@ static void handleIpv4(const uint8_t* frame, ssize_t len, Observation& obs) {
     }
 }
 
+static bool sendRawFrameToInterface(
+    int fd,
+    int ifindex,
+    const std::vector<uint8_t>& frame,
+    const MacBytes& dstMac) {
+    struct sockaddr_ll addr {};
+    addr.sll_family = AF_PACKET;
+    addr.sll_protocol = htons(ETH_P_ARP);
+    addr.sll_ifindex = ifindex;
+    addr.sll_halen = ETH_ALEN;
+    std::memcpy(addr.sll_addr, dstMac.data(), ETH_ALEN);
+
+    const ssize_t sent = sendto(
+        fd,
+        frame.data(),
+        frame.size(),
+        0,
+        reinterpret_cast<struct sockaddr*>(&addr),
+        sizeof(addr));
+
+    if (sent < 0) {
+        std::cerr << "sendto() failed while sending ARP probe: " << std::strerror(errno) << "\n";
+        return false;
+    }
+
+    if (sent != static_cast<ssize_t>(frame.size())) {
+        std::cerr << "sendto() sent a partial ARP probe frame\n";
+        return false;
+    }
+
+    return true;
+}
+
+static void recordArpProbeReply(
+    const uint8_t* frame,
+    ssize_t len,
+    unsigned char packetType,
+    const std::set<uint32_t>& targetIps,
+    ArpProbeResult& result,
+    Observation& obs) {
+    if (packetType == PACKET_OUTGOING) {
+        return;
+    }
+
+    const auto hit = parseArpProbeReply(frame, len, targetIps);
+    if (!hit) {
+        return;
+    }
+
+    if (result.replies.emplace(hit->ip, hit->mac).second) {
+        obs.macCount[hit->mac]++;
+        obs.srcIpCount[ipv4HostToString(hit->ip)]++;
+    }
+}
+
+static bool drainAvailableArpProbeReplies(
+    int fd,
+    const std::set<uint32_t>& targetIps,
+    ArpProbeResult& result,
+    Observation& obs,
+    std::vector<uint8_t>& buf) {
+    for (;;) {
+        struct sockaddr_ll packetAddress {};
+        socklen_t packetAddressLen = sizeof(packetAddress);
+        const ssize_t n = recvfrom(
+            fd,
+            buf.data(),
+            buf.size(),
+            MSG_DONTWAIT,
+            reinterpret_cast<struct sockaddr*>(&packetAddress),
+            &packetAddressLen);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return true;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            std::cerr << "recv() failed while draining ARP probe replies: "
+                      << std::strerror(errno) << "\n";
+            return false;
+        }
+
+        recordArpProbeReply(
+            buf.data(),
+            n,
+            packetAddress.sll_pkttype,
+            targetIps,
+            result,
+            obs);
+    }
+}
+
+static bool runArpProbeCidr(
+    const Config& cfg,
+    const CaptureSocket& captureSocket,
+    Observation& obs,
+    ArpProbeResult& result,
+    RotatingLog* logStream) {
+    if (!cfg.probeCidr) {
+        return true;
+    }
+
+    const auto ownMacBytes = macStringToBytes(captureSocket.ownMac);
+    if (!ownMacBytes) {
+        std::cerr << "Failed to parse interface MAC address for ARP probing: "
+                  << captureSocket.ownMac << "\n";
+        return false;
+    }
+
+    result = ArpProbeResult{};
+    result.cidr = *cfg.probeCidr;
+
+    std::set<uint32_t> targetIps;
+    for (uint32_t ip = result.cidr.first;; ++ip) {
+        targetIps.insert(ip);
+        if (ip == result.cidr.last) {
+            break;
+        }
+    }
+
+    writeToOutputs(
+        "ARP probing " + formatCidrRange(result.cidr) + " on " + cfg.ifname + "...\n",
+        consoleOutput(cfg),
+        logStream);
+
+    MacBytes broadcast {};
+    broadcast.fill(0xff);
+    std::vector<uint8_t> buf(65536);
+
+    for (const uint32_t targetIp : targetIps) {
+        const uint32_t senderIp = chooseArpProbeSenderIp(
+            result.cidr,
+            targetIp,
+            captureSocket.ownIpv4Addresses);
+        const auto frame = buildArpProbeFrame(*ownMacBytes, senderIp, targetIp);
+        if (!sendRawFrameToInterface(captureSocket.fd, captureSocket.ifindex, frame, broadcast)) {
+            return false;
+        }
+        ++result.probesSent;
+
+        if (result.probesSent % 256 == 0 &&
+            !drainAvailableArpProbeReplies(captureSocket.fd, targetIps, result, obs, buf)) {
+            return false;
+        }
+    }
+
+    if (!drainAvailableArpProbeReplies(captureSocket.fd, targetIps, result, obs, buf)) {
+        return false;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(cfg.timeoutSec);
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto now = std::chrono::steady_clock::now();
+        auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
+        const auto maxSelectWait = std::chrono::duration_cast<std::chrono::microseconds>(
+            kInterfacePollInterval);
+        if (remaining > maxSelectWait) {
+            remaining = maxSelectWait;
+        }
+
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(captureSocket.fd, &rfds);
+
+        struct timeval tv {};
+        tv.tv_sec = remaining.count() / 1000000;
+        tv.tv_usec = remaining.count() % 1000000;
+
+        const int rc = select(captureSocket.fd + 1, &rfds, nullptr, nullptr, &tv);
+        if (rc < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::cerr << "select() failed while waiting for ARP probe replies: "
+                      << std::strerror(errno) << "\n";
+            return false;
+        }
+        if (rc == 0) {
+            continue;
+        }
+
+        struct sockaddr_ll packetAddress {};
+        socklen_t packetAddressLen = sizeof(packetAddress);
+        const ssize_t n = recvfrom(
+            captureSocket.fd,
+            buf.data(),
+            buf.size(),
+            0,
+            reinterpret_cast<struct sockaddr*>(&packetAddress),
+            &packetAddressLen);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::cerr << "recv() failed while reading ARP probe replies: "
+                      << std::strerror(errno) << "\n";
+            return false;
+        }
+
+        recordArpProbeReply(
+            buf.data(),
+            n,
+            packetAddress.sll_pkttype,
+            targetIps,
+            result,
+            obs);
+    }
+
+    return true;
+}
+
 static int runCaptureSession(const Config& cfg, RotatingLog* logStream) {
     writeToOutputs(formatRunTimestampLine(currentLocalTimestamp()), consoleOutput(cfg), logStream);
 
@@ -1096,6 +1570,14 @@ static int runCaptureSession(const Config& cfg, RotatingLog* logStream) {
     }
 
     Observation obs;
+    if (cfg.probeCidr) {
+        ArpProbeResult probeResult;
+        if (!runArpProbeCidr(cfg, captureSocket, obs, probeResult, logStream)) {
+            return 1;
+        }
+        writeToOutputs(formatArpProbeReport(cfg, probeResult), consoleOutput(cfg), logStream);
+    }
+
     std::vector<uint8_t> buf(65536);
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(cfg.timeoutSec);
 

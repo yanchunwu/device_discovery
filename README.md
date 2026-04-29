@@ -25,6 +25,7 @@ This tool is most useful when you need to answer questions like:
 - Infers a likely gateway IP address from ARP traffic
 - Detects link-local probing activity during device discovery
 - Detects SSDP traffic to `239.255.255.250:1900` during early device startup
+- Can actively ARP-probe a CIDR to find quiet fixed-IP devices
 - Appends normal run output to `infer_iot_raw.log` in the current directory by default
 - Supports built-in size-based log rotation with configurable archive retention
 - Can repeat capture sessions indefinitely with `--loop`
@@ -114,6 +115,12 @@ Or with explicit options:
 sudo ./bin/infer_iot_raw -i eth1 -n 100 -t 15
 ```
 
+Or actively probe a CIDR before passive capture:
+
+```bash
+sudo ./bin/infer_iot_raw -i eth1 --probe-cidr 192.168.11.0/24
+```
+
 Or choose a custom log filename:
 
 ```bash
@@ -158,6 +165,7 @@ Supported options:
 - `-n`, `--packets <count>`: maximum packets to capture
 - `-t`, `--timeout <sec>`: stop after the given timeout
 - `-o`, `--output <path>`: log file path, default `infer_iot_raw.log`
+- `--probe-cidr <cidr>`: actively send ARP probes across a CIDR before passive capture, for example `192.168.11.0/24`; maximum 65536 candidate addresses
 - `--rotate-size <size>`: rotate the log before it grows beyond this size, for example `10M`; default `0` disables rotation
 - `--retain <count>`: number of rotated log files to keep when rotation is enabled; default `5`
 - `-l`, `--loop`: repeat capture sessions forever
@@ -222,7 +230,7 @@ You can also override the install location or stage the completion file with the
 
 The completion script supports:
 
-- option completion for `-h`, `--help`, `-i`, `--interface`, `-n`, `--packets`, `-t`, `--timeout`, `-o`, `--output`, `--rotate-size`, `--retain`, `-l`, `--loop`, `-q`, `--quiet`
+- option completion for `-h`, `--help`, `-i`, `--interface`, `-n`, `--packets`, `-t`, `--timeout`, `-o`, `--output`, `--probe-cidr`, `--rotate-size`, `--retain`, `-l`, `--loop`, `-q`, `--quiet`
 - interface-name completion from `/sys/class/net`
 - command completion for `infer_iot_raw`, `./infer_iot_raw`, `bin/infer_iot_raw`, and `./bin/infer_iot_raw`
 
@@ -271,6 +279,8 @@ PACKETS=500000 TIMEOUT=1800 ROTATE_SIZE=25M RETAIN_COUNT=14 ./scripts/setup-syst
 3. Start capture on the target interface.
 4. Power-cycle the IoT device.
 5. Review the inferred MAC, IP, gateway, and link-local probe output.
+
+For quiet fixed-IP devices that do not emit boot traffic, add `--probe-cidr <cidr>` to send ARP probes across the expected subnet before passive capture.
 
 If an IP address is inferred, the tool prints a suggested next-step network test at the end of execution.
 

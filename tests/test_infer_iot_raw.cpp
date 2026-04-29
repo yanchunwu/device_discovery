@@ -71,6 +71,36 @@ std::vector<uint8_t> buildArpRequest(
     return frame;
 }
 
+std::vector<uint8_t> buildArpReply(
+    const uint8_t (&srcMac)[6],
+    const uint8_t (&dstMac)[6],
+    const std::string& senderIp,
+    const std::string& targetIp) {
+    std::vector<uint8_t> frame(sizeof(struct ether_header) + sizeof(struct ether_arp));
+    auto* eth = reinterpret_cast<struct ether_header*>(frame.data());
+    std::memcpy(eth->ether_dhost, dstMac, ETH_ALEN);
+    std::memcpy(eth->ether_shost, srcMac, ETH_ALEN);
+    eth->ether_type = htons(ETHERTYPE_ARP);
+
+    auto* arp = reinterpret_cast<struct ether_arp*>(frame.data() + sizeof(struct ether_header));
+    arp->ea_hdr.ar_hrd = htons(ARPHRD_ETHER);
+    arp->ea_hdr.ar_pro = htons(ETHERTYPE_IP);
+    arp->ea_hdr.ar_hln = ETH_ALEN;
+    arp->ea_hdr.ar_pln = 4;
+    arp->ea_hdr.ar_op = htons(ARPOP_REPLY);
+    std::memcpy(arp->arp_sha, srcMac, ETH_ALEN);
+    std::memcpy(arp->arp_tha, dstMac, ETH_ALEN);
+
+    in_addr senderAddr {};
+    in_addr targetAddr {};
+    expect(inet_pton(AF_INET, senderIp.c_str(), &senderAddr) == 1, "invalid sender IP fixture");
+    expect(inet_pton(AF_INET, targetIp.c_str(), &targetAddr) == 1, "invalid target IP fixture");
+    std::memcpy(arp->arp_spa, &senderAddr.s_addr, sizeof(senderAddr.s_addr));
+    std::memcpy(arp->arp_tpa, &targetAddr.s_addr, sizeof(targetAddr.s_addr));
+
+    return frame;
+}
+
 std::vector<uint8_t> buildUdpIpv4Frame(
     const uint8_t (&srcMac)[6],
     const std::string& srcIp,
@@ -164,6 +194,19 @@ void testParseArgsAcceptsQuietFlag() {
     expect(cfg.quiet, "expected quiet mode to be enabled");
 }
 
+void testParseArgsAcceptsProbeCidr() {
+    Config cfg;
+    std::vector<std::string> args = {"infer_iot_raw", "-i", "eth0", "--probe-cidr", "192.168.11.55/24"};
+    auto argv = makeArgv(args);
+
+    expect(parseArgs(static_cast<int>(argv.size()), argv.data(), cfg), "parseArgs should accept probe CIDR");
+    expect(cfg.probeCidr.has_value(), "expected probe CIDR to be stored");
+    expect(formatCidrRange(*cfg.probeCidr) == "192.168.11.0/24", "expected CIDR to normalize to network address");
+    expect(cfg.probeCidr->first == *parseIpv4String("192.168.11.1"), "expected first /24 host");
+    expect(cfg.probeCidr->last == *parseIpv4String("192.168.11.254"), "expected last /24 host");
+    expect(cfg.probeCidr->addressCount == 254, "expected /24 probe to exclude network and broadcast");
+}
+
 void testParseArgsRejectsInvalidPacketCount() {
     Config cfg;
     std::vector<std::string> args = {"infer_iot_raw", "-i", "eth0", "-n", "0"};
@@ -194,6 +237,26 @@ void testParseArgsRejectsInvalidRetainCount() {
     expect(!parseArgs(static_cast<int>(argv.size()), argv.data(), cfg), "parseArgs should reject negative retain count");
 }
 
+void testParseArgsRejectsInvalidProbeCidr() {
+    Config cfg;
+    std::vector<std::string> args = {"infer_iot_raw", "-i", "eth0", "--probe-cidr", "192.168.11.0/33"};
+    auto argv = makeArgv(args);
+    StreamCapture stdoutCapture(std::cout);
+    StreamCapture stderrCapture(std::cerr);
+
+    expect(!parseArgs(static_cast<int>(argv.size()), argv.data(), cfg), "parseArgs should reject invalid CIDR");
+}
+
+void testParseArgsRejectsOversizedProbeCidr() {
+    Config cfg;
+    std::vector<std::string> args = {"infer_iot_raw", "-i", "eth0", "--probe-cidr", "10.0.0.0/8"};
+    auto argv = makeArgv(args);
+    StreamCapture stdoutCapture(std::cout);
+    StreamCapture stderrCapture(std::cerr);
+
+    expect(!parseArgs(static_cast<int>(argv.size()), argv.data(), cfg), "parseArgs should reject oversized CIDR");
+}
+
 void testSuggestLocalTestAddressUsesDeviceOrGatewaySubnet() {
     const auto fromDevice = suggestLocalTestAddress(std::optional<std::string>("10.0.5.23"), std::nullopt);
     expect(fromDevice && *fromDevice == "10.0.5.10/24", "expected /24 suggestion from device IP");
@@ -202,10 +265,35 @@ void testSuggestLocalTestAddressUsesDeviceOrGatewaySubnet() {
     expect(fromGateway && *fromGateway == "172.16.1.11/24", "expected host fallback to avoid .10 collision");
 }
 
+void testParseCidrHandlesHostAndPointToPointRanges() {
+    const auto fromHost = parseCidr("192.168.11.55/24");
+    expect(fromHost.has_value(), "expected CIDR with host address to parse");
+    expect(formatCidrRange(*fromHost) == "192.168.11.0/24", "expected host CIDR to normalize");
+    expect(fromHost->addressCount == 254, "expected /24 to scan usable host addresses");
+
+    const auto pointToPoint = parseCidr("10.0.0.2/31");
+    expect(pointToPoint.has_value(), "expected /31 to parse");
+    expect(pointToPoint->first == *parseIpv4String("10.0.0.2"), "expected /31 first address");
+    expect(pointToPoint->last == *parseIpv4String("10.0.0.3"), "expected /31 last address");
+    expect(pointToPoint->addressCount == 2, "expected /31 to include both addresses");
+}
+
 void testNormalizeOuiPrefixAcceptsMacFormats() {
     expect(normalizeOuiPrefix("b8:a4:4f:01:02:03") == "B8A44F", "expected colon-delimited MAC to normalize");
     expect(normalizeOuiPrefix("B8-A4-4F") == "B8A44F", "expected hyphenated OUI to normalize");
     expect(normalizeOuiPrefix("invalid") == "", "expected invalid OUI input to be rejected");
+}
+
+void testMacStringToBytesAcceptsCommonFormats() {
+    const auto colon = macStringToBytes("02:11:22:33:44:55");
+    expect(colon.has_value(), "expected colon MAC to parse");
+    expect((*colon)[0] == 0x02 && (*colon)[5] == 0x55, "expected parsed MAC bytes");
+
+    const auto hyphen = macStringToBytes("02-11-22-33-44-55");
+    expect(hyphen.has_value(), "expected hyphen MAC to parse");
+    expect((*hyphen)[1] == 0x11 && (*hyphen)[4] == 0x44, "expected parsed hyphen MAC bytes");
+
+    expect(!macStringToBytes("bad").has_value(), "expected invalid MAC to fail");
 }
 
 void testParseByteSizeAcceptsSuffixes() {
@@ -434,6 +522,62 @@ void testInterfaceNeedsRebindDetectsMissingOrReplacedInterface() {
         "changed interface index should need rebind");
 }
 
+void testChooseArpProbeSenderIpPrefersInterfaceAddressInRange() {
+    const auto range = parseCidr("192.168.11.0/24");
+    expect(range.has_value(), "expected CIDR fixture to parse");
+
+    const uint32_t target = *parseIpv4String("192.168.11.55");
+    const uint32_t own = chooseArpProbeSenderIp(*range, target, {"10.0.0.20", "192.168.11.100"});
+    expect(own == *parseIpv4String("192.168.11.100"), "expected in-range interface IP to be preferred");
+
+    const uint32_t fallback = chooseArpProbeSenderIp(*range, target, {"10.0.0.20"});
+    expect(fallback == *parseIpv4String("192.168.11.1"), "expected first usable host fallback");
+
+    const uint32_t collisionFallback = chooseArpProbeSenderIp(*range, *parseIpv4String("192.168.11.1"), {});
+    expect(collisionFallback == *parseIpv4String("192.168.11.254"), "expected fallback to avoid target collision");
+}
+
+void testBuildArpProbeFrameCreatesWhoHasRequest() {
+    const auto srcMac = macStringToBytes("02:11:22:33:44:55");
+    expect(srcMac.has_value(), "expected MAC fixture to parse");
+
+    const auto frame = buildArpProbeFrame(
+        *srcMac,
+        *parseIpv4String("192.168.11.100"),
+        *parseIpv4String("192.168.11.55"));
+
+    const auto* eth = reinterpret_cast<const struct ether_header*>(frame.data());
+    expect(ntohs(eth->ether_type) == ETHERTYPE_ARP, "expected ARP ether type");
+    expect(macToString(eth->ether_shost) == "02:11:22:33:44:55", "expected source MAC in Ethernet header");
+
+    const auto* arp = reinterpret_cast<const struct ether_arp*>(frame.data() + sizeof(struct ether_header));
+    expect(ntohs(arp->ea_hdr.ar_op) == ARPOP_REQUEST, "expected ARP request opcode");
+
+    uint32_t senderIpBe = 0;
+    uint32_t targetIpBe = 0;
+    std::memcpy(&senderIpBe, arp->arp_spa, sizeof(senderIpBe));
+    std::memcpy(&targetIpBe, arp->arp_tpa, sizeof(targetIpBe));
+    expect(ipToString(senderIpBe) == "192.168.11.100", "expected sender protocol address");
+    expect(ipToString(targetIpBe) == "192.168.11.55", "expected target protocol address");
+}
+
+void testParseArpProbeReplyMatchesTargetIp() {
+    const uint8_t deviceMac[6] = {0xb8, 0xa4, 0x4f, 0x01, 0x02, 0x03};
+    const uint8_t ownMac[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
+    const auto reply = buildArpReply(deviceMac, ownMac, "192.168.11.55", "192.168.11.100");
+    const std::set<uint32_t> targets = {*parseIpv4String("192.168.11.55")};
+
+    const auto hit = parseArpProbeReply(reply.data(), static_cast<ssize_t>(reply.size()), targets);
+    expect(hit.has_value(), "expected matching ARP reply to be parsed");
+    expect(hit->ip == *parseIpv4String("192.168.11.55"), "expected reply sender IP");
+    expect(hit->mac == "b8:a4:4f:01:02:03", "expected reply sender MAC");
+
+    const std::set<uint32_t> otherTargets = {*parseIpv4String("192.168.11.56")};
+    expect(
+        !parseArpProbeReply(reply.data(), static_cast<ssize_t>(reply.size()), otherTargets).has_value(),
+        "expected non-target ARP reply to be ignored");
+}
+
 void testShouldIgnoreCapturedFrameFiltersOwnAndOutgoingTraffic() {
     const uint8_t ownMac[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
     const uint8_t deviceMac[6] = {0xb8, 0xa4, 0x4f, 0x01, 0x02, 0x03};
@@ -520,6 +664,19 @@ void testHandleArpTracksGatewayAndLinkLocalProbe() {
     expect(obs.srcIpCount.count("0.0.0.0") == 0, "0.0.0.0 should not be counted as a usable source IP");
 }
 
+void testHandleArpTracksRepliesAsDeviceEvidence() {
+    const uint8_t deviceMac[6] = {0xb8, 0xa4, 0x4f, 0x01, 0x02, 0x03};
+    const uint8_t ownMac[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
+    Observation obs;
+
+    const auto replyFrame = buildArpReply(deviceMac, ownMac, "192.168.11.55", "192.168.11.100");
+    handleArp(replyFrame.data(), static_cast<ssize_t>(replyFrame.size()), obs);
+
+    expect(obs.macCount["b8:a4:4f:01:02:03"] == 1, "expected ARP reply to count source MAC");
+    expect(obs.srcIpCount["192.168.11.55"] == 1, "expected ARP reply sender IP to be counted");
+    expect(obs.arpGatewayCount.empty(), "ARP replies should not be treated as gateway probes");
+}
+
 void testHandleIpv4TracksSourceAndDetectsSsdp() {
     const uint8_t srcMac[6] = {0x00, 0x16, 0x3e, 0xaa, 0xbb, 0xcc};
     Observation obs;
@@ -544,11 +701,16 @@ int main() {
         {"parseArgs accepts rotation policy", testParseArgsAcceptsRotationPolicy},
         {"parseArgs accepts loop flag", testParseArgsAcceptsLoopFlag},
         {"parseArgs accepts quiet flag", testParseArgsAcceptsQuietFlag},
+        {"parseArgs accepts probe CIDR", testParseArgsAcceptsProbeCidr},
         {"parseArgs rejects invalid packet count", testParseArgsRejectsInvalidPacketCount},
         {"parseArgs rejects invalid rotate size", testParseArgsRejectsInvalidRotateSize},
         {"parseArgs rejects invalid retain count", testParseArgsRejectsInvalidRetainCount},
+        {"parseArgs rejects invalid probe CIDR", testParseArgsRejectsInvalidProbeCidr},
+        {"parseArgs rejects oversized probe CIDR", testParseArgsRejectsOversizedProbeCidr},
         {"suggestLocalTestAddress uses device or gateway subnet", testSuggestLocalTestAddressUsesDeviceOrGatewaySubnet},
+        {"parseCidr handles host and point-to-point ranges", testParseCidrHandlesHostAndPointToPointRanges},
         {"normalizeOuiPrefix accepts MAC formats", testNormalizeOuiPrefixAcceptsMacFormats},
+        {"macStringToBytes accepts common formats", testMacStringToBytesAcceptsCommonFormats},
         {"parseByteSize accepts suffixes", testParseByteSizeAcceptsSuffixes},
         {"parseOuiLine extracts vendor entry", testParseOuiLineExtractsVendorEntry},
         {"lookupMacVendor uses local OUI file", testLookupMacVendorUsesLocalOuiFile},
@@ -563,9 +725,13 @@ int main() {
         {"waitForInterface times out cleanly", testWaitForInterfaceTimesOutCleanly},
         {"transient interface errors are recoverable", testTransientInterfaceErrorsAreRecoverable},
         {"interfaceNeedsRebind detects missing or replaced interface", testInterfaceNeedsRebindDetectsMissingOrReplacedInterface},
+        {"chooseArpProbeSenderIp prefers interface address in range", testChooseArpProbeSenderIpPrefersInterfaceAddressInRange},
+        {"buildArpProbeFrame creates who-has request", testBuildArpProbeFrameCreatesWhoHasRequest},
+        {"parseArpProbeReply matches target IP", testParseArpProbeReplyMatchesTargetIp},
         {"shouldIgnoreCapturedFrame filters own and outgoing traffic", testShouldIgnoreCapturedFrameFiltersOwnAndOutgoingTraffic},
         {"shouldIgnoreCapturedFrame filters own IPv4 traffic", testShouldIgnoreCapturedFrameFiltersOwnIpv4Traffic},
         {"handleArp tracks gateway and link-local probe", testHandleArpTracksGatewayAndLinkLocalProbe},
+        {"handleArp tracks replies as device evidence", testHandleArpTracksRepliesAsDeviceEvidence},
         {"handleIpv4 tracks source and detects SSDP", testHandleIpv4TracksSourceAndDetectsSsdp},
     };
 
